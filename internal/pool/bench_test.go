@@ -9,9 +9,9 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// 本文件为 P 组性能审查的量化基准（go test -bench 可复现），结论见 REVIEW-conflicts-perf.md。
+// Этот файл — количественные бенчмарки проверки производительности группы P (воспроизводимо через go test -bench), выводы см. в REVIEW-conflicts-perf.md.
 
-// benchPool 构建 46 账号的池（对齐生产规模），全部 healthy 且 credits 各不相同。
+// benchPool строит пул на 46 аккаунтов (вровень с продмасштабом), все healthy и с разными credits.
 func benchPool(b *testing.B) *Pool {
 	p := New("")
 	for i := 0; i < 46; i++ {
@@ -21,7 +21,7 @@ func benchPool(b *testing.B) *Pool {
 	return p
 }
 
-// BenchmarkPick46Accounts P1：46 账号全扫描 + 全排序 + 三因子权重抽签的每次耗时。
+// BenchmarkPick46Accounts P1: время одного прохода при полном скане 46 аккаунтов + полной сортировке + трёхфакторной взвешенной жеребьёвке.
 func BenchmarkPick46Accounts(b *testing.B) {
 	p := benchPool(b)
 	b.ResetTimer()
@@ -30,7 +30,7 @@ func BenchmarkPick46Accounts(b *testing.B) {
 	}
 }
 
-// BenchmarkStateSerialize46Accounts P2：46 账号 state.json 序列化（stateOverviewLocked + MarshalIndent）。
+// BenchmarkStateSerialize46Accounts P2: сериализация state.json 46 аккаунтов (stateOverviewLocked + MarshalIndent).
 func BenchmarkStateSerialize46Accounts(b *testing.B) {
 	p := benchPool(b)
 	p.mu.Lock()
@@ -44,7 +44,7 @@ func BenchmarkStateSerialize46Accounts(b *testing.B) {
 	}
 }
 
-// BenchmarkStateSerializeCompact46 P2 对照：json.Marshal（非缩进）耗时，量化写放大的下界。
+// BenchmarkStateSerializeCompact46 контроль к P2: время json.Marshal (без отступов), нижняя граница write amplification.
 func BenchmarkStateSerializeCompact46(b *testing.B) {
 	p := benchPool(b)
 	p.mu.Lock()
@@ -58,7 +58,7 @@ func BenchmarkStateSerializeCompact46(b *testing.B) {
 	}
 }
 
-// BenchmarkSnapshotMarshal46 P2/P4 相关：saveLocked 落盘时额外镜像一次 snapshot（含 savedAt）的序列化成本。
+// BenchmarkSnapshotMarshal46 по теме P2/P4: цена сериализации лишнего зеркала snapshot (с savedAt) при записи saveLocked на диск.
 func BenchmarkSnapshotMarshal46(b *testing.B) {
 	p := benchPool(b)
 	p.mu.Lock()
@@ -73,10 +73,10 @@ func BenchmarkSnapshotMarshal46(b *testing.B) {
 	}
 }
 
-// BenchmarkGoroutineSpawn P4 量化：单次 fire-and-forget goroutine 起搏的 CPU 成本下界
-// （对应对 Session.SetBind / pool SaveState 每次镜像派生 goroutine 的开销，不含网络，
+// BenchmarkGoroutineSpawn количественно по P4: нижняя граница CPU-цены одного старта fire-and-forget goroutine
+// (соответствует цене порождения goroutine на каждое зеркало Session.SetBind / pool SaveState, без сети,
 //
-//	网络走 5s 超时 fire-and-forget）。
+//	сеть идёт fire-and-forget с таймаутом 5s).
 func BenchmarkGoroutineSpawn(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

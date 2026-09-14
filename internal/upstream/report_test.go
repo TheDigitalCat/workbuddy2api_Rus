@@ -10,8 +10,8 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// TestReportChatActivitySendsArrayWithUserID 断言出站 body 是数组、含 userId、eventCode 正确，
-// 且 requestId 与 conversationId 可独立（多轮同会话各条 requestId 不同）。
+// TestReportChatActivitySendsArrayWithUserID проверяет, что исходящий body — массив, несёт userId и верный eventCode,
+// а requestId и conversationId независимы (у многоходовых отчётов одной сессии requestId разные).
 func TestReportChatActivitySendsArrayWithUserID(t *testing.T) {
 	var got []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,21 +43,21 @@ func TestReportChatActivitySendsArrayWithUserID(t *testing.T) {
 		t.Errorf("eventCode=%v want chat_request_send", ev["eventCode"])
 	}
 	if ev["userId"] != "u-active" {
-		t.Errorf("userId=%v want u-active（缺失则服务端 200 但静默丢弃）", ev["userId"])
+		t.Errorf("userId=%v, хотим u-active (при отсутствии сервер отвечает 200, но молча отбрасывает)", ev["userId"])
 	}
 	if ev["conversationId"] != "wb2api-123" {
 		t.Errorf("conversationId=%v want wb2api-123", ev["conversationId"])
 	}
 	if ev["requestId"] != "req-7" {
-		t.Errorf("requestId=%v want req-7（多轮同会话 requestId 独立）", ev["requestId"])
+		t.Errorf("requestId=%v, хотим req-7 (у многоходовых отчётов одной сессии requestId независимы)", ev["requestId"])
 	}
 	if ev["mode"] != "craft" {
 		t.Errorf("mode=%v want craft", ev["mode"])
 	}
-	// 出站 body 必须是数组（以 [ 开头），不是单个对象。
+	// Исходящий body обязан быть массивом (начинаться с [), а не одиночным объектом.
 }
 
-// TestReportChatActivityServerError 业务 code 非 0 返回 *Error。
+// TestReportChatActivityServerError — при бизнес-code != 0 возвращаем *Error.
 func TestReportChatActivityServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)

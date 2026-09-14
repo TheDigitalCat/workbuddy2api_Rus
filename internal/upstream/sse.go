@@ -1,4 +1,4 @@
-// sse.go 处理上游 SSE 流：聚合成单个 OpenAI 响应，或透传给客户端。
+// sse.go обрабатывает восходящий SSE-поток: агрегирует в единый ответ OpenAI либо прозрачно проксирует клиенту.
 package upstream
 
 import (
@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
-// 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
-// tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
+// Aggregate читает полный SSE-поток, агрегируя delta.content в единый ответ OpenAI chat.completion.
+// Фрагменты/полстроки разбирает bufio.Reader.ReadString; завершаем на "data: [DONE]".
+// tool_calls прилетают потоковыми delta (слияние по index: первый фрагмент несёт id/type/name, дальше только куски arguments).
 func Aggregate(r io.Reader) (map[string]any, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var (
@@ -38,12 +38,12 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		if strings.HasPrefix(line, "data: ") {
 			payload := strings.TrimPrefix(line, "data: ")
 			if payload == "[DONE]" {
-				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
+// Явное завершение апстрима: прекращаем чтение, любые данные после DONE игнорируем.
 				break
 			} else {
 				var chunk map[string]any
 				if json.Unmarshal([]byte(payload), &chunk) == nil {
-					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
+// Счётчик валидных событий: засчитываем только дата-фреймы с успешным разбором JSON (ошибки разбора молча пропускаем через continue).
 					validEvents++
 					if v, ok := chunk["id"].(string); ok && id == "" {
 						id = v
@@ -97,7 +97,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 									}
 								}
 							}
-							// 有的上游把完整消息放在 message 里（非 delta）
+// Некоторые апстримы кладут полное сообщение в message (не delta)
 							if msg, ok := c["message"].(map[string]any); ok && !gotAnyContent {
 								if txt, ok := msg["content"].(string); ok {
 									content.WriteString(txt)
@@ -113,8 +113,8 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		}
 	}
 	if validEvents == 0 {
-		// 上游返回 200 但没有任何有效数据事件（空流/只有 [DONE]/只有注释行）：
-		// 不再合成空 content 的假成功响应，直接报错，由 handler 映射为 502 upstream_parse。
+// Апстрим вернул 200, но без валидных дата-событий (пустой поток/только [DONE]/только строки-комментарии):
+// больше не синтезируем ложный успех с пустым content, сразу возвращаем ошибку, handler отобразит её в 502 upstream_parse.
 		return nil, fmt.Errorf("upstream stream contained no valid data events")
 	}
 	if id == "" {
@@ -157,8 +157,8 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 	return resp, nil
 }
 
-// mergeToolCallDelta 把流式 tool_call 片段合并到累计对象：
-// id/type/function.name 直覆盖（后续分片通常缺省），function.arguments 拼接。
+// mergeToolCallDelta сливает потоковый фрагмент tool_call в накопленный объект:
+// id/type/function.name перезаписываем напрямую (в поздних фрагментах обычно отсутствуют), function.arguments склеиваем.
 func mergeToolCallDelta(merged, delta map[string]any) {
 	if v, ok := delta["id"].(string); ok && v != "" {
 		merged["id"] = v
@@ -187,7 +187,7 @@ func mergeToolCallDelta(merged, delta map[string]any) {
 	}
 }
 
-// sortInts 升序排序（避免引 sort 包只为三行）。
+// sortInts сортирует по возрастанию (чтобы не тянуть пакет sort ради трёх строк).
 func sortInts(a []int) {
 	for i := 0; i < len(a)-1; i++ {
 		for j := i + 1; j < len(a); j++ {
@@ -198,60 +198,10 @@ func sortInts(a []int) {
 	}
 }
 
-// backfillToolCallNames 维护跨帧的 tool_calls name 缓存并回填：
-// 上游流式分片中，首 chunk 带 function.name，后续 chunk 常缺省或置空 ""，
-// 逐 chunk 消费的客户端会把工具名清空导致 tool call 卡死（hawklithm/workbuddy2api issue#2）。
-// 按 delta.tool_calls 的 index 缓存首现的非空 name，后续分片缺 name 时回填；
-// 只动 tool_calls 的 function.name 字段，其余透传不变。
-func backfillToolCallNames(obj map[string]any, names map[int]string) {
-	choices, _ := obj["choices"].([]any)
-	for _, ci := range choices {
-		c, _ := ci.(map[string]any)
-		if c == nil {
-			continue
-		}
-		delta, _ := c["delta"].(map[string]any)
-		if delta == nil {
-			continue
-		}
-		tcs, _ := delta["tool_calls"].([]any)
-		for _, tci := range tcs {
-			tc, _ := tci.(map[string]any)
-			if tc == nil {
-				continue
-			}
-			idx := 0
-			if v, ok := tc["index"].(float64); ok {
-				idx = int(v)
-			}
-			fn, _ := tc["function"].(map[string]any)
-			name := ""
-			if fn != nil {
-				if v, ok := fn["name"].(string); ok {
-					name = v
-				}
-			}
-			if name != "" {
-				// 缓存：后续分片以本次为准（覆盖旧值，允许上游中途改名）。
-				names[idx] = name
-				continue
-			}
-			// 缺/空 name：从缓存回填（首现分片已缓存，这里命中同 index 的后续分片）。
-			if cached, ok := names[idx]; ok {
-				if fn == nil {
-					fn = map[string]any{}
-					tc["function"] = fn
-				}
-				fn["name"] = cached
-			}
-		}
-	}
-}
-
-// normalizeFrame 以 OpenAI 流式规范白名单重建帧：仅保留标准字段，
-// 剔除上游噪声（finish_reason:"" → null、空 content/refusal、空 tool_calls 列表、
-// 空占位 function_call、顶层未知字段），空 delta 键一律省略，
-// usage 缺失 → null，保证任意标准客户端按规范解析。
+// normalizeFrame пересобирает фрейм по белому списку потокового стандарта OpenAI: оставляет только стандартные поля,
+// вычищает шум апстрима (finish_reason:"" → null, пустые content/refusal, пустой список tool_calls,
+// пустая заглушка function_call, неизвестные поля верхнего уровня), пустые ключи delta всегда опускаем,
+// отсутствующий usage → null, чтобы любой стандартный клиент разбирал строго по спецификации.
 func normalizeFrame(obj map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, k := range []string{"id", "object", "created", "model", "system_fingerprint", "service_tier"} {
@@ -294,7 +244,7 @@ func normalizeFrame(obj map[string]any) map[string]any {
 					delta["tool_calls"] = tcs
 				}
 				if fc, ok := d["function_call"]; ok && fc != nil {
-					// 空占位 function_call（name/arguments 全空）视为噪声剔除
+// Пустую заглушку function_call (name/arguments оба пусты) считаем шумом и выкидываем
 					keep := false
 					if fcm, ok2 := fc.(map[string]any); ok2 {
 						n, _ := fcm["name"].(string)
@@ -326,9 +276,9 @@ func normalizeFrame(obj map[string]any) map[string]any {
 	return out
 }
 
-// Stream 透传上游 SSE 到 w（逐帧规范化后 flush），保证至少写一个 [DONE]。
-// 调用方必须先设置过 status 200；本函数自设 SSE headers。
-// 流式策略：逐帧透传（规范化已剥空 content 噪声），恢复与上游一致的平滑流式。
+// Stream прозрачно проксирует восходящий SSE в w (с пофреймовой нормализацией и flush), гарантируя хотя бы один [DONE].
+// Вызывающая сторона обязана заранее выставить status 200; SSE-заголовки выставляет сама функция.
+// Стратегия потока: проксируем пофреймово (нормализация уже сняла шум пустого content), восстанавливая плавный стриминг как у апстрима.
 func Stream(w http.ResponseWriter, r io.Reader) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
@@ -337,34 +287,12 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 	h.Set("X-Accel-Buffering", "no")
 	fl, _ := w.(http.Flusher)
 
-	// toolCallNames 跨帧维护 delta.tool_calls[index] → function.name，
-	// 供逐 chunk 透传时回填被上游清空的 name（hawklithm/workbuddy2api issue#2）。
-	toolCallNames := map[int]string{}
-
-	// firstID 透传流的消息级 id 基准：缓存首个非空上游 id，后续帧缺失/空串时复用
-	// （issue #35：同一条 SSE 消息所有帧共用一个真实 id，后台按 id 归并；此前中间帧
-	// 一律补 chatcmpl-wb2api 哨兵，造成同流 id 分裂）。全流无真实 id → 才出现哨兵。
-	firstID := ""
-
-	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
-	// 仅 JSON 解析成功时计数记为一次有效转发（JSON 解析失败照常降级原样写出，但不计数）。
+// writeFrame пересобирает payload по белому списку стандарта и пишет data-фреймом с flush.
+// Засчитываем валидную пересылку только при успешном разборе JSON (при ошибке разбора пишем как есть в деградированном виде, но не засчитываем).
 	writeFrame := func(payload string) (int, error) {
 		var obj map[string]any
 		valid := 0
 		if json.Unmarshal([]byte(payload), &obj) == nil {
-			// 先按 index 回填 tool_calls name（上游后续 chunk 常缺省/置空），再规范化透传。
-			backfillToolCallNames(obj, toolCallNames)
-			// id 续传：首帧非空真实 id 缓存；后续帧缺 id / 空 id 一律用缓存值，
-			// 有自己 id 的帧保持原样（不同流分裂的帧允许各自 id）。
-			if firstID == "" {
-				if v, ok := obj["id"].(string); ok && v != "" {
-					firstID = v
-				}
-			} else {
-				if v, ok := obj["id"].(string); !ok || v == "" {
-					obj["id"] = firstID
-				}
-			}
 			if raw, err := json.Marshal(normalizeFrame(obj)); err == nil {
 				payload = string(raw)
 			}
@@ -379,8 +307,8 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 		return valid, nil
 	}
 
-	// writeRaw 原样写出一帧（绕过 normalizeFrame）并 flush。空流错误帧需保留 error 字段，
-	// 不能被白名单剥掉，故不经 writeFrame 规范化。
+// writeRaw пишет фрейм как есть (в обход normalizeFrame) с flush. Ошибочному фрейму пустого потока нужно сохранить поле error,
+// поэтому его нельзя чистить белым списком — пишем мимо нормализации writeFrame.
 	writeRaw := func(payload string) error {
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
 			return werr
@@ -399,8 +327,8 @@ readLoop:
 		trimmed := strings.TrimRight(line, "\r\n")
 		switch {
 		case strings.HasPrefix(trimmed, "data: [DONE]"):
-			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
-			// [DONE] 统一在循环结束后写出，保证恰好一个。
+// Явное завершение апстрима: прекращаем чтение, любые данные после DONE (включая мусорные фреймы) дальше не проксируем.
+// [DONE] пишем единообразно после цикла, гарантируя ровно один.
 			break readLoop
 		case strings.HasPrefix(trimmed, "data: "):
 			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
@@ -409,7 +337,7 @@ readLoop:
 				return werr
 			}
 		case trimmed != "":
-			// 注释/其他行：原样透传
+// Строки-комментарии/прочие: проксируем как есть
 			if _, werr := io.WriteString(w, line); werr != nil {
 				return werr
 			}
@@ -417,7 +345,7 @@ readLoop:
 				fl.Flush()
 			}
 		}
-		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
+// Пустые строки (разделители фреймов) глотаем: функция сама ставит "\n\n"
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -425,12 +353,12 @@ readLoop:
 			return err
 		}
 	}
-	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
-	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
+// Пустой поток (0 валидных фреймов): сначала пишем error-фрейм (в обход normalizeFrame, чтобы сохранить поле error),
+// затем добиваем [DONE], чтобы клиент корректно завершился, и возвращаем не-nil ошибку для логирования вызывающей стороной.
 	if validFrames == 0 {
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error"}}`)
 	}
-	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
+// Гарантируем ровно один [DONE] (если апстрим его не прислал — добиваем сами).
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 		return err
 	}

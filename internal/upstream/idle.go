@@ -1,4 +1,4 @@
-// idle.go 聊天 SSE 流中空闲监控：活跃吐数据续命不掐，静默超过阈值才断流（释放租约）。
+// idle.go — контроль простоя в chat SSE-потоке: пока данные идут, соединение живёт; рвём только при тишине дольше порога (освобождая аренду).
 package upstream
 
 import (
@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// idleMonitoringBody 包在聊天 SSE body 外层：
-// 每次读到底层数据（n>0）就刷新 lastRead；后台 goroutine 周期检查，
-// 静默超过 idle 就 cancel 请求 context，中断阻塞中的 Read。
+// idleMonitoringBody оборачивает chat SSE-body:
+// каждое чтение данных из нижележащего слоя (n>0) обновляет lastRead; фоновая goroutine периодически проверяет,
+// при тишине дольше idle отменяет context запроса, прерывая заблокированный Read.
 type idleMonitoringBody struct {
 	rc       io.ReadCloser
 	mu       sync.Mutex
@@ -30,7 +30,7 @@ func (b *idleMonitoringBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Close 停掉后台 goroutine、取消请求 context、关闭底流，保证无泄漏。
+// Close останавливает фоновую goroutine, отменяет context запроса и закрывает нижележащий поток, исключая утечки.
 func (b *idleMonitoringBody) Close() error {
 	b.stopOnce.Do(func() { close(b.stopCh) })
 	b.cancel()
@@ -43,9 +43,9 @@ func (b *idleMonitoringBody) idleFor() time.Duration {
 	return time.Since(b.lastRead)
 }
 
-// monitorBody 若 idle<=0 直接返回原底流（禁用空闲监控）；
-// 否则包上流中空闲监控。计时从返回 body 之后开始——首字节阶段由
-// Transport.ResponseHeaderTimeout 管，这里不抢跑。
+// monitorBody при idle<=0 возвращает исходный поток как есть (контроль простоя отключён);
+// иначе оборачивает контролем простоя в потоке. Отсчёт начинается после возврата body — фазу первого байта ведёт
+// Transport.ResponseHeaderTimeout, здесь не забегаем вперёд.
 func monitorBody(rc io.ReadCloser, idle time.Duration, cancel context.CancelFunc) io.ReadCloser {
 	if idle <= 0 {
 		return rc
@@ -74,7 +74,7 @@ func monitorBody(rc io.ReadCloser, idle time.Duration, cancel context.CancelFunc
 	return b
 }
 
-// idleTick 返回监控周期：idle/4，钳在 [10ms, 1s]。小 idle 也能快速发现，大小值避免空转。
+// idleTick возвращает период проверки: idle/4, зажат в [10ms, 1s]. Малые idle обнаруживаются быстро, большие не крутятся вхолостую.
 func idleTick(idle time.Duration) time.Duration {
 	d := idle / 4
 	if d > time.Second {

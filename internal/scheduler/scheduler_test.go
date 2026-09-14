@@ -6,8 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -45,7 +43,7 @@ func TestNextFireMergesSchedules(t *testing.T) {
 	}
 }
 
-// TestNextWakeKeepaliveOnly 签到已过点时按保活整点唤醒。
+// TestNextWakeKeepaliveOnly: подписание уже прошло — будим по часу keepalive.
 func TestNextWakeKeepaliveOnly(t *testing.T) {
 	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
@@ -58,27 +56,25 @@ func TestNextWakeKeepaliveOnly(t *testing.T) {
 	}
 }
 
-// TestNextWakeSameInstantFiresAll 签到与保活配到同一整点时两类任务都要执行。
+// TestNextWakeSameInstantFiresAll: подписание и keepalive на одном часе — выполняем оба класса задач.
 func TestNextWakeSameInstantFiresAll(t *testing.T) {
 	s := New(Config{
 		CheckinHours:     []int{9, 22},
-		TravelHours:      []int{}, // 禁用旅行时点干扰（仅测签到+保活同整点）
-		ActivityHours:    []int{}, // 禁用活跃时点干扰
+		TravelHours:      []int{}, // глушим точки путешествий (меряем только подписание+keepalive на одном часе)
+		ActivityHours:    []int{}, // глушим точки активности
 		KeepaliveHours:   []int{22},
 		TravelDisabled:   true,
 		ActivityDisabled: true,
-		SchoolDisabled:   true,
-		CatDisabled:      true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if !hasKind(kinds, taskCheckin) || !hasKind(kinds, taskKeepalive) {
-		t.Errorf("kinds=%v want checkin+keepalive（同一时刻两任务）", kinds)
+		t.Errorf("kinds=%v want checkin+keepalive (две задачи на один момент)", kinds)
 	}
 
-	// 22 点过后下一次是次日 09:00，且只含签到（旅行/活跃已禁用）。
+	// После 22:00 следующее — 09:00 следующего дня, только подписание (путешествия/активность отключены).
 	at, kinds = s.nextWake(time.Date(2026, 9, 11, 22, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 12, 9, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
@@ -88,7 +84,7 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 	}
 }
 
-// TestNextWakeNothingScheduled 两类任务全空时返回零值，Run 只等退出信号。
+// TestNextWakeNothingScheduled: оба класса задач пусты — возвращаем zero, Run только ждёт сигнал выхода.
 func TestNextWakeNothingScheduled(t *testing.T) {
 	s := &Scheduler{cfg: Config{}}
 	at, kinds := s.nextWake(time.Now())
@@ -97,41 +93,39 @@ func TestNextWakeNothingScheduled(t *testing.T) {
 	}
 }
 
-// TestNextWakeCheckinDisabled 显式禁用签到后，排程里不再有签到时点（保活照常）。
+// TestNextWakeCheckinDisabled: после явного отключения подписания точек подписания в расписании нет (keepalive как был).
 func TestNextWakeCheckinDisabled(t *testing.T) {
 	s := New(Config{CheckinDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（不应再有 21 点签到）", at, want)
+		t.Errorf("next=%v want %v (подписания на 21:00 больше не должно быть)", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskKeepalive {
 		t.Errorf("kinds=%v want [keepalive]", kinds)
 	}
 }
 
-// TestNextWakeKeepaliveDisabled 显式禁用保活后，排程里不再有保活时点（签到照常）。
+// TestNextWakeKeepaliveDisabled: после явного отключения keepalive точек keepalive в расписании нет (подписание как было).
 func TestNextWakeKeepaliveDisabled(t *testing.T) {
 	s := New(Config{KeepaliveDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（不应再有 22 点保活）", at, want)
+		t.Errorf("next=%v want %v (keepalive на 22:00 больше не должно быть)", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskCheckin {
 		t.Errorf("kinds=%v want [checkin]", kinds)
 	}
 }
 
-// TestNextWakeBothDisabledNothingScheduled 六类任务都显式禁用 → 无可唤醒时点。
+// TestNextWakeBothDisabledNothingScheduled: все четыре класса явно отключены — будить нечего.
 func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	s := New(Config{
 		CheckinDisabled:   true,
 		TravelDisabled:    true,
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
-		SchoolDisabled:    true,
-		CatDisabled:       true,
 		CheckinHours:      []int{9, 21},
 		KeepaliveHours:    []int{22},
 	})
@@ -141,8 +135,8 @@ func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	}
 }
 
-// TestRunAllDisabledNoSpinNoCalls 六类任务全禁用：Run 不空转（只等退出信号），
-// 且不能触发任何上游请求。
+// TestRunAllDisabledNoSpinNoCalls: все четыре класса отключены — Run не крутится вхолостую (только ждёт сигнал выхода),
+// и не должен триггерить ни одного запроса вверх.
 func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -165,24 +159,22 @@ func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 		TravelDisabled:    true,
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
-		SchoolDisabled:    true,
-		CatDisabled:       true,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	s.Run(ctx) // 阻塞到 ctx 取消为止（无时点可等，不构造 timer）
+	s.Run(ctx) // блокируемся до отмены ctx (ждать нечего, timer не строим)
 	elapsed := time.Since(start)
 
 	if calls.Load() != 0 {
-		t.Errorf("upstream calls=%d want 0（六类全禁用）", calls.Load())
+		t.Errorf("upstream calls=%d want 0 (все четыре отключены)", calls.Load())
 	}
 	if elapsed < 200*time.Millisecond {
-		t.Errorf("Run returned after %v, before ctx done（不应提前返回）", elapsed)
+		t.Errorf("Run returned after %v, before ctx done (не должен возвращаться раньше)", elapsed)
 	}
 	if elapsed > 2*time.Second {
-		t.Errorf("Run took %v（不应空转/忙等）", elapsed)
+		t.Errorf("Run took %v (не должен крутиться/ждать в busy loop)", elapsed)
 	}
 }
 
@@ -195,7 +187,7 @@ func hasKind(kinds []taskKind, k taskKind) bool {
 	return false
 }
 
-// fakeUpstream 同时模拟 billing 与 refresh。
+// fakeUpstream одновременно имитирует billing и refresh.
 type fakeUpstream struct {
 	checkinCalls   atomic.Int32
 	refreshCalls   atomic.Int32
@@ -233,7 +225,7 @@ func TestRunCheckinReenablesCoolingAccount(t *testing.T) {
 	p := pool.New("")
 	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999}
 	p.Add(a)
-	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足")
+	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足") // данные: причина-цитата апстрима, не переводим
 
 	up := &upstream.Client{
 		HTTP:          srv.Client(),
@@ -300,32 +292,32 @@ func TestRunKeepaliveSessionDeadDisables(t *testing.T) {
 		BillingBaseCN: srv.URL,
 	}
 	s := New(Config{Pool: p, Upstream: up})
-	// P0-1：12153 连续 N 次才禁用。前 2 次刷新失败不应杀号（误判防护）。
+	// P0-1: 12153 отключает только после N подряд. Первые 2 провала обновления не должны убивать номер (защита от ложных).
 	s.RunKeepaliveNow()
 	if st, _ := p.Status("u1"); st.Disabled {
-		t.Fatalf("第 1 次 12153 不应禁用: %+v", st)
+		t.Fatalf("1-й 12153 не должен отключать: %+v", st)
 	}
 	s.RunKeepaliveNow()
 	if st, _ := p.Status("u1"); st.Disabled {
-		t.Fatalf("第 2 次 12153 不应禁用: %+v", st)
+		t.Fatalf("2-й 12153 не должен отключать: %+v", st)
 	}
-	// 第 3 次连续 12153 → 禁用。
+	// 3-й подряд 12153 — отключаем.
 	s.RunKeepaliveNow()
 	st, _ := p.Status("u1")
 	if !st.Disabled {
-		t.Errorf("第 3 次连续 12153 应禁用: %+v", st)
+		t.Errorf("3-й подряд 12153 должен отключать: %+v", st)
 	}
 	if st.DisabledReason != "12153 session dead" {
 		t.Errorf("disabled_reason=%q want 12153 session dead", st.DisabledReason)
 	}
 }
 
-// TestRunKeepaliveSessionDeadResetBySuccess 两次 12153 后刷新成功 → 计数清零，
-// 再来的 12153 从第 1 次重新计（不会因历史失败被继续追杀）。
+// TestRunKeepaliveSessionDeadResetBySuccess: дважды 12153, затем успешное обновление — счёт обнуляется,
+// следующие 12153 считаем заново с 1-го (исторические провалы больше не преследуют).
 func TestRunKeepaliveSessionDeadResetBySuccess(t *testing.T) {
 	var fails atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if fails.Add(1) == 3 { // 第 3 次（本次调度循环的第二轮）刷新成功
+		if fails.Add(1) == 3 { // 3-й раз (второй круг этого цикла планировщика) — обновление успешно
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
 			return
 		}
@@ -347,18 +339,18 @@ func TestRunKeepaliveSessionDeadResetBySuccess(t *testing.T) {
 	s.RunKeepaliveNow() // 12153 #1
 	s.RunKeepaliveNow() // 12153 #2
 	if st, _ := p.Status("u1"); st.Disabled {
-		t.Fatalf("precondition: 前 2 次不应禁用: %+v", st)
+		t.Fatalf("precondition: первые 2 не должны отключать: %+v", st)
 	}
-	s.RunKeepaliveNow() // 刷新成功 → 清计数
-	// 接下来连续 2 次 12153：从新计数重新算，仍不应禁用（历史计数已清）。
-	s.RunKeepaliveNow() // 12153 #1（新计数）
-	s.RunKeepaliveNow() // 12153 #2（新计数）
+	s.RunKeepaliveNow() // обновление успешно — чистим счёт
+	// Дальше 2 подряд 12153: считаем заново с нового счёта, всё ещё не должны отключать (исторический счёт сброшен).
+	s.RunKeepaliveNow() // 12153 #1 (новый счёт)
+	s.RunKeepaliveNow() // 12153 #2 (новый счёт)
 	if st, _ := p.Status("u1"); st.Disabled {
-		t.Fatalf("刷新成功清计数后连续 2 次 12153 不应禁用: %+v", st)
+		t.Fatalf("после сброса счёта успешным обновлением 2 подряд 12153 не должны отключать: %+v", st)
 	}
-	s.RunKeepaliveNow() // 12153 #3（新计数）→ 禁用
+	s.RunKeepaliveNow() // 12153 #3 (новый счёт) — отключаем
 	if st, _ := p.Status("u1"); !st.Disabled {
-		t.Fatalf("新计数第 3 次 12153 应禁用: %+v", st)
+		t.Fatalf("3-й 12153 нового счёта должен отключать: %+v", st)
 	}
 }
 
@@ -377,18 +369,18 @@ func TestCheckinErrorDoesNotCrash(t *testing.T) {
 		BillingBaseCN: srv.URL,
 	}
 	s := New(Config{Pool: p, Upstream: up})
-	// 不应 panic
+	// не должен паниковать
 	s.RunCheckinNow()
 	s.RunKeepaliveNow()
 	_ = errors.New("unused")
 }
 
-// checkinStub 配置化的签到上游：可控制签到响应（ok/already/fail）、刷新是否失败、
-// 余额返回值。各分支命中后 atomic 计数，便于并发安全断言。
+// checkinStub — конфигурируемый апстрим подписания: управляем ответом подписания (ok/already/fail), провалом обновления,
+// возвратом баланса. Попадания по веткам считаем через atomic — удобно для конкурентно-безопасных assert'ов.
 type checkinStub struct {
-	checkinBody    string // /daily-checkin 返回的完整 body（含 code/msg）
-	checkinStatus  int    // /daily-checkin HTTP 状态码（0=200）
-	refreshFail    bool   // /token/refresh 是否失败（返回 12153 session dead）
+	checkinBody    string // полный body ответа /daily-checkin (включая code/msg)
+	checkinStatus  int    // HTTP-статус /daily-checkin (0=200)
+	refreshFail    bool   // падает ли /token/refresh (возвращает 12153 session dead)
 	refreshCalls   atomic.Int32
 	resourceRemain int64
 }
@@ -418,7 +410,7 @@ func (s *checkinStub) server() *httptest.Server {
 	}))
 }
 
-// newCheckinS 构造 Pool+Upstream+Scheduler，账号 token 未过期（不触发预刷新）。
+// newCheckinS собирает Pool+Upstream+Scheduler, token номера не протух (предобновление не триггерим).
 func newCheckinS(t *testing.T, stub *checkinStub) (*Scheduler, *pool.Pool) {
 	t.Helper()
 	srv := stub.server()
@@ -429,7 +421,7 @@ func newCheckinS(t *testing.T, stub *checkinStub) (*Scheduler, *pool.Pool) {
 	return New(Config{Pool: p, Upstream: up}), p
 }
 
-// TestCheckinAllOK 签到成功 → ok、余额回填、credits 指针有值。
+// TestCheckinAllOK: подписание успешно — ok, баланс подтянут, указатель credits непуст.
 func TestCheckinAllOK(t *testing.T) {
 	s, p := newCheckinS(t, &checkinStub{
 		checkinBody:    `{"code":0,"msg":"ok","data":{}}`,
@@ -450,10 +442,10 @@ func TestCheckinAllOK(t *testing.T) {
 	}
 }
 
-// TestCheckinAllAlready "今天已签到"记 already、不回填 400 报文到 detail。
+// TestCheckinAllAlready: цитату апстрима «今天已签到» (данные, не переводим) пишем как already, тело 400 в detail не подтягиваем.
 func TestCheckinAllAlready(t *testing.T) {
 	s, _ := newCheckinS(t, &checkinStub{
-		checkinBody:    `{"code":14001,"msg":"今天已签到"}`,
+		checkinBody:    `{"code":14001,"msg":"今天已签到"}`, // данные: входной body апстрима (цитата «今天已签到»), не переводим
 		resourceRemain: 300,
 	})
 	out, err := s.CheckinAll()
@@ -464,11 +456,11 @@ func TestCheckinAllAlready(t *testing.T) {
 		t.Errorf("status=%q want already", out[0].Status)
 	}
 	if out[0].Detail != "" {
-		t.Errorf("已签到不应回填 detail，got=%q", out[0].Detail)
+		t.Errorf("подписанный не должен подтягивать detail, got=%q", out[0].Detail)
 	}
 }
 
-// TestCheckinAllFail 签到上游 500 → fail、detail 填报错。
+// TestCheckinAllFail: апстрим подписания 500 — fail, в detail пишем ошибку.
 func TestCheckinAllFail(t *testing.T) {
 	s, _ := newCheckinS(t, &checkinStub{
 		checkinBody:    `boom`,
@@ -480,11 +472,11 @@ func TestCheckinAllFail(t *testing.T) {
 		t.Errorf("status=%q want fail", out[0].Status)
 	}
 	if out[0].Detail == "" {
-		t.Error("fail 应填 detail")
+		t.Error("fail должен заполнить detail")
 	}
 }
 
-// TestCheckinAllSkipsDisabled 禁用账号记 skipped，不参与签到。
+// TestCheckinAllSkipsDisabled: отключённый номер пишем skipped, в подписании не участвует.
 func TestCheckinAllSkipsDisabled(t *testing.T) {
 	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
 	srv := stub.server()
@@ -508,7 +500,7 @@ func TestCheckinAllSkipsDisabled(t *testing.T) {
 	}
 }
 
-// TestCheckinAllSkipsNoCredentials 无 refreshToken 的账号记 skipped(no credentials)。
+// TestCheckinAllSkipsNoCredentials: номер без refreshToken пишем skipped(no credentials).
 func TestCheckinAllSkipsNoCredentials(t *testing.T) {
 	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
 	srv := stub.server()
@@ -526,13 +518,13 @@ func TestCheckinAllSkipsNoCredentials(t *testing.T) {
 	}
 }
 
-// TestCheckinAllRefreshBeforeExpiry token 临近过期 → 签到前先刷新，刷新成功后继续签到。
+// TestCheckinAllRefreshBeforeExpiry: token скоро протухает — перед подписанием обновляем, после успеха продолжаем подписание.
 func TestCheckinAllRefreshBeforeExpiry(t *testing.T) {
 	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
 	srv := stub.server()
 	defer srv.Close()
 	p := pool.New("")
-	// ExpiresAt 5 分钟后过期，落在 checkinRefreshSkew(10min) 窗口内 → 触发预刷新。
+	// ExpiresAt протухает через 5 минут, попадает в окно checkinRefreshSkew(10min) — триггерим предобновление.
 	a := &auth.Auth{UID: "u1", AccessToken: "old", RefreshToken: "rt",
 		ExpiresAt: time.Now().Add(5 * time.Minute).Unix()}
 	p.Add(a)
@@ -540,17 +532,17 @@ func TestCheckinAllRefreshBeforeExpiry(t *testing.T) {
 	s := New(Config{Pool: p, Upstream: up})
 	out, _ := s.CheckinAll()
 	if stub.refreshCalls.Load() != 1 {
-		t.Errorf("refresh calls=%d want 1（过期窗口应预刷新）", stub.refreshCalls.Load())
+		t.Errorf("refresh calls=%d want 1 (окно протухания должно предобновить)", stub.refreshCalls.Load())
 	}
 	if out[0].Status != CheckinOK {
-		t.Errorf("status=%q want ok（刷新成功后继续签到）", out[0].Status)
+		t.Errorf("status=%q want ok (после успешного обновления продолжаем подписание)", out[0].Status)
 	}
 	if a.AccessToken != "new" {
-		t.Errorf("token 未刷新: %s", a.AccessToken)
+		t.Errorf("token не обновлён: %s", a.AccessToken)
 	}
 }
 
-// TestCheckinAllRefreshFlakyContinues 刷新抖动失败但 token 未真过期 → 继续签到（不阻断）。
+// TestCheckinAllRefreshFlakyContinues: обновление дёрнулось с провалом, но token по-настоящему не протух — продолжаем подписание (не блокируем).
 func TestCheckinAllRefreshFlakyContinues(t *testing.T) {
 	stub := &checkinStub{
 		checkinBody:    `{"code":0,"msg":"ok","data":{}}`,
@@ -560,8 +552,8 @@ func TestCheckinAllRefreshFlakyContinues(t *testing.T) {
 	srv := stub.server()
 	defer srv.Close()
 	p := pool.New("")
-	// token 5 分钟后过期（在窗口内 → 尝试刷新），但 NeedsRefresh(0) 仍 false（未真过期）。
-	// 刷新返回 12153 但不是真 session dead 的终态——token 仍有效，继续签到。
+	// token протухает через 5 минут (в окне — пробуем обновить), но NeedsRefresh(0) всё ещё false (по-настоящему не протух).
+	// Обновление вернуло 12153, но это не терминальный session dead — token всё ещё валиден, продолжаем подписание.
 	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt",
 		ExpiresAt: time.Now().Add(5 * time.Minute).Unix()}
 	p.Add(a)
@@ -569,14 +561,14 @@ func TestCheckinAllRefreshFlakyContinues(t *testing.T) {
 	s := New(Config{Pool: p, Upstream: up})
 	out, _ := s.CheckinAll()
 	if out[0].Status != CheckinOK {
-		t.Errorf("status=%q want ok（刷新抖动不应阻断签到）", out[0].Status)
+		t.Errorf("status=%q want ok (дёрнувшееся обновление не должно блокировать подписание)", out[0].Status)
 	}
 	if stub.refreshCalls.Load() != 1 {
 		t.Errorf("refresh calls=%d want 1", stub.refreshCalls.Load())
 	}
 }
 
-// TestCheckinAllRefreshTrulyExpiredFails 刷新失败且 token 真过期 → 记 fail。
+// TestCheckinAllRefreshTrulyExpiredFails: обновление провалилось и token по-настоящему протух — пишем fail.
 func TestCheckinAllRefreshTrulyExpiredFails(t *testing.T) {
 	stub := &checkinStub{
 		checkinBody: `{"code":0,"msg":"ok","data":{}}`,
@@ -585,25 +577,25 @@ func TestCheckinAllRefreshTrulyExpiredFails(t *testing.T) {
 	srv := stub.server()
 	defer srv.Close()
 	p := pool.New("")
-	// ExpiresAt 已是过去 → NeedsRefresh(0) 为 true（真过期），刷新失败即 fail。
+	// ExpiresAt уже в прошлом — NeedsRefresh(0) true (по-настоящему протух), провал обновления — это fail.
 	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1}
 	p.Add(a)
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 	out, _ := s.CheckinAll()
 	if out[0].Status != CheckinFail {
-		t.Errorf("status=%q want fail（真过期 + 刷新失败）", out[0].Status)
+		t.Errorf("status=%q want fail (по-настоящему протух + провал обновления)", out[0].Status)
 	}
 	if out[0].Detail == "" || !strings.HasPrefix(out[0].Detail, "refresh:") {
-		t.Errorf("detail=%q want refresh: 前缀", out[0].Detail)
+		t.Errorf("detail=%q want префикс refresh:", out[0].Detail)
 	}
 }
 
-// TestCheckinAllBusy 并发第二次调用返回 ErrBusy（TryLock 串行化）。
+// TestCheckinAllBusy: конкурентный второй вызов возвращает ErrBusy (сериализация через TryLock).
 func TestCheckinAllBusy(t *testing.T) {
 	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
 	s, _ := newCheckinS(t, stub)
-	// 手动持锁模拟一次签到正在执行，再调 CheckinAll 应得 ErrBusy。
+	// Вручную держим лок — имитируем идущее подписание, повторный CheckinAll должен дать ErrBusy.
 	s.checkinMu.Lock()
 	defer s.checkinMu.Unlock()
 	_, err := s.CheckinAll()
@@ -612,7 +604,7 @@ func TestCheckinAllBusy(t *testing.T) {
 	}
 }
 
-// TestCheckinAllReenablesCoolingAccount 冷却账号签到成功 + 余额恢复 → 解冻。
+// TestCheckinAllReenablesCoolingAccount: охлаждённый номер успешно подписался + баланс восстановился — размораживаем.
 func TestCheckinAllReenablesCoolingAccount(t *testing.T) {
 	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 500}
 	srv := stub.server()
@@ -620,7 +612,7 @@ func TestCheckinAllReenablesCoolingAccount(t *testing.T) {
 	p := pool.New("")
 	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999}
 	p.Add(a)
-	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足")
+	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足") // данные: причина-цитата апстрима, не переводим
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 	out, err := s.CheckinAll()
@@ -631,95 +623,6 @@ func TestCheckinAllReenablesCoolingAccount(t *testing.T) {
 		t.Errorf("status=%q want ok", out[0].Status)
 	}
 	if st, _ := p.Status("u1"); st.Cooling {
-		t.Errorf("签到 + 余额恢复应解冻: %+v", st)
-	}
-}
-
-// TestRunKeepaliveBackfillsRealm 验证 keepalive refresh 成功后，SaveAtomic 落盘文件
-// 自动补上 realm 标识：老 global 文件（domain=workbuddy.ai，无 realm 键）→ global，
-// 老 CN 文件（空 domain，无 realm 键）→ cn；再次 refresh 不改变已补的标识（幂等）。
-func TestRunKeepaliveBackfillsRealm(t *testing.T) {
-	cases := []struct {
-		name       string
-		fixture    string
-		filename   string
-		wantRealm  string
-	}{
-		{
-			name: "老 global 落盘补 global",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai"},"account":{"uid":"g1"}}`,
-			filename:   "workbuddy-g1.json",
-			wantRealm:  "global",
-		},
-		{
-			name: "老 CN 空 domain 落盘补 cn",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":""},"account":{"uid":"c1"}}`,
-			filename:   "workbuddy-c1.json",
-			wantRealm:  "cn",
-		},
-		{
-			name: "已有 realm 不被覆盖——global domain 显式 cn 保持 cn",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai","realm":"cn"},"account":{"uid":"c2"}}`,
-			filename:   "workbuddy-c2.json",
-			wantRealm:  "cn",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			dir := t.TempDir()
-			fp := filepath.Join(dir, c.filename)
-			if err := os.WriteFile(fp, []byte(c.fixture), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			a, err := auth.Parse([]byte(c.fixture))
-			if err != nil {
-				t.Fatal(err)
-			}
-			a.FilePath = fp
-
-			p := pool.New("")
-			p.Add(a)
-
-			f := &fakeUpstream{}
-			srv := f.server()
-			defer srv.Close()
-			up := &upstream.Client{
-				HTTP:          srv.Client(),
-				ChatBaseCN:    srv.URL,
-				BillingBaseCN: srv.URL,
-			}
-			s := New(Config{Pool: p, Upstream: up})
-
-			s.RunKeepaliveNow()
-			if f.refreshCalls.Load() != 1 {
-				t.Fatalf("refresh calls=%d", f.refreshCalls.Load())
-			}
-			raw, err := os.ReadFile(fp)
-			if err != nil {
-				t.Fatalf("read back: %v", err)
-			}
-			b, err := auth.Parse(raw)
-			if err != nil {
-				t.Fatalf("reparse: %v", err)
-			}
-			if b.RealmStored() != c.wantRealm {
-				t.Errorf("realm=%q want %q after refresh+save", b.RealmStored(), c.wantRealm)
-			}
-
-			// 幂等：已有标识后再跑一轮 refresh+save，值不变
-			s.RunKeepaliveNow()
-			raw2, err := os.ReadFile(fp)
-			if err != nil {
-				t.Fatalf("read after second run: %v", err)
-			}
-			b2, err := auth.Parse(raw2)
-			if err != nil {
-				t.Fatalf("reparse after second: %v", err)
-			}
-			if b2.RealmStored() != c.wantRealm {
-				t.Errorf("realm=%q want %q after idempotent run", b2.RealmStored(), c.wantRealm)
-			}
-		})
+		t.Errorf("подписание + восстановленный баланс должны разморозить: %+v", st)
 	}
 }

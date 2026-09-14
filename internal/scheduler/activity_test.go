@@ -15,7 +15,7 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// fastActivity 关闭活跃上报账号间限速与账号内上报间隔，避免测试白等。
+// fastActivity глушит межномерной лимит и интервал отчётов активности, чтобы тесты не ждали вхолостую.
 func fastActivity(t *testing.T) {
 	t.Helper()
 	oldDelay := activityAccountDelay
@@ -28,7 +28,7 @@ func fastActivity(t *testing.T) {
 	})
 }
 
-// reportStub 记录 /v2/report 调用次数与 userId。
+// reportStub считает вызовы /v2/report и userId.
 type reportStub struct {
 	calls  atomic.Int32
 	uids   atomic.Int32
@@ -43,7 +43,7 @@ func (s *reportStub) handler() http.Handler {
 			if uid != "" {
 				s.uids.Add(1)
 			}
-			s.bodies.Add(1) // 标记收到 body（断言数组含 userId 在 upstream 包单测覆盖）
+			s.bodies.Add(1) // помечаем, что body пришёл (наличие userId в массиве assert'ов покрыто юнит-тестами пакета upstream)
 			w.Write([]byte(`{"code":0,"msg":"OK"}`))
 			return
 		}
@@ -51,7 +51,7 @@ func (s *reportStub) handler() http.Handler {
 	})
 }
 
-// TestRunActivityNowReportsEachAccount 遍历池内每个可用账号上报一次。
+// TestRunActivityNowReportsEachAccount: по каждому доступному номеру пула отчитываемся один раз.
 func TestRunActivityNowReportsEachAccount(t *testing.T) {
 	fastActivity(t)
 	stub := &reportStub{}
@@ -67,14 +67,14 @@ func TestRunActivityNowReportsEachAccount(t *testing.T) {
 	s.RunActivityNow()
 
 	if n := stub.calls.Load(); n != 2 {
-		t.Errorf("report calls=%d want 2（每号上报一次）", n)
+		t.Errorf("report calls=%d want 2 (по одному отчёту на номер)", n)
 	}
 	if n := stub.uids.Load(); n != 2 {
-		t.Errorf("report with X-User-Id=%d want 2（每号必带 userId）", n)
+		t.Errorf("report with X-User-Id=%d want 2 (каждый номер обязан нести userId)", n)
 	}
 }
 
-// TestRunActivityNowSkipsDisabledAndNoToken 禁用账号与无 token 账号跳过。
+// TestRunActivityNowSkipsDisabledAndNoToken: отключённые номера и номера без token пропускаем.
 func TestRunActivityNowSkipsDisabledAndNoToken(t *testing.T) {
 	fastActivity(t)
 	stub := &reportStub{}
@@ -92,17 +92,17 @@ func TestRunActivityNowSkipsDisabledAndNoToken(t *testing.T) {
 	s.RunActivityNow()
 
 	if n := stub.calls.Load(); n != 1 {
-		t.Errorf("report calls=%d want 1（仅 ok 账号）", n)
+		t.Errorf("report calls=%d want 1 (только ok-номер)", n)
 	}
 }
 
-// TestRunActivityNowErrorDoesNotAbort 单账号上报失败不影响后续遍历。
+// TestRunActivityNowErrorDoesNotAbort: провал отчёта одного номера не влияет на обход остальных.
 func TestRunActivityNowErrorDoesNotAbort(t *testing.T) {
 	fastActivity(t)
 	var okCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v2/report" {
-			// streak 自检等非 report 请求直接回 200（不带计数，只统计 /v2/report）。
+			// streak-самопроверку и прочие не-report запросы сразу отвечаем 200 (без счётчика, считаем только /v2/report).
 			w.Write([]byte(`{"code":0,"data":{}}`))
 			return
 		}
@@ -123,23 +123,23 @@ func TestRunActivityNowErrorDoesNotAbort(t *testing.T) {
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 
-	s.RunActivityNow() // 不应 panic
+	s.RunActivityNow() // не должен паниковать
 
 	if n := okCalls.Load(); n != 1 {
-		t.Errorf("ok account report calls=%d want 1（失败账号不影响后续遍历）", n)
+		t.Errorf("ok account report calls=%d want 1 (провальный номер не влияет на обход остальных)", n)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// P1：活跃上报后回读 streak 自检
+// P1: после отчёта активности перечитываем streak-самопроверку
 // ---------------------------------------------------------------------------
 
-// activityStreakStub 模拟 /v2/report（200 成功）+ /activity/growth/streak（days 可配）。
+// activityStreakStub имитирует /v2/report (200 успех) + /activity/growth/streak (days настраиваем).
 type activityStreakStub struct {
 	reportCalls atomic.Int32
-	days        int  // streak 返回的连登天数
-	streakErr   bool // 让 streak 返回 500
-	noUserId    bool // 待测：上报不带 userId（服务端 200 但静默丢弃）
+	days        int  // дней серии входов, возвращаемых streak
+	streakErr   bool // заставить streak вернуть 500
+	noUserId    bool // кейс: отчёт без userId (сервер 200, но молча выкидывает)
 	streakHits  atomic.Int32
 }
 
@@ -163,7 +163,7 @@ func (s *activityStreakStub) handler() http.Handler {
 	})
 }
 
-// activityStreakScheduler 构造带 streak 自检 stub 的调度器。
+// activityStreakScheduler собирает планировщик со stub'ом streak-самопроверки.
 func activityStreakScheduler(t *testing.T, srv *httptest.Server) (*Scheduler, *pool.Pool) {
 	t.Helper()
 	p := pool.New("")
@@ -172,7 +172,7 @@ func activityStreakScheduler(t *testing.T, srv *httptest.Server) (*Scheduler, *p
 	return New(Config{Pool: p, Upstream: up}), p
 }
 
-// TestRunActivityNowSelfCheckDaysNormal 上报成功后回读 streak：days>=1 → 无告警。
+// TestRunActivityNowSelfCheckDaysNormal: после успешного отчёта перечитываем streak: days>=1 — без алерта.
 func TestRunActivityNowSelfCheckDaysNormal(t *testing.T) {
 	fastActivity(t)
 	stub := &activityStreakStub{days: 3}
@@ -188,13 +188,13 @@ func TestRunActivityNowSelfCheckDaysNormal(t *testing.T) {
 	if stub.reportCalls.Load() != 1 || stub.streakHits.Load() != 1 {
 		t.Errorf("report_calls=%d streak_hits=%d want 1/1", stub.reportCalls.Load(), stub.streakHits.Load())
 	}
-	// days>=1：checkActivityStreak 返回 false（无可疑）。
+	// days>=1: checkActivityStreak возвращает false (ничего подозрительного).
 	if s.checkActivityStreak(p.AuthByUID("u1")) {
-		t.Fatal("days>=1 不告警")
+		t.Fatal("days>=1 не должен алертить")
 	}
 }
 
-// TestRunActivityNowSelfCheckSilentDrop 上报 200 但 streak.days=0 → 告警（silent drop?）。
+// TestRunActivityNowSelfCheckSilentDrop: отчёт 200, но streak.days=0 — алертим (silent drop?).
 func TestRunActivityNowSelfCheckSilentDrop(t *testing.T) {
 	fastActivity(t)
 	stub := &activityStreakStub{days: 0}
@@ -207,11 +207,11 @@ func TestRunActivityNowSelfCheckSilentDrop(t *testing.T) {
 	s := New(Config{Pool: p, Upstream: up})
 
 	if !s.checkActivityStreak(p.AuthByUID("u1")) {
-		t.Fatal("days=0 应告警（上报 200 但 silent drop?）")
+		t.Fatal("days=0 должен алертить (отчёт 200, но silent drop?)")
 	}
 }
 
-// TestRunActivityNowSelfCheckGETFailure 回读 GET 失败 → 告警但不影响主流程（上报已成功）。
+// TestRunActivityNowSelfCheckGETFailure: перечитывающий GET провалился — алертим, но главный поток не трогаем (отчёт уже успешен).
 func TestRunActivityNowSelfCheckGETFailure(t *testing.T) {
 	fastActivity(t)
 	stub := &activityStreakStub{days: 1, streakErr: true}
@@ -223,17 +223,17 @@ func TestRunActivityNowSelfCheckGETFailure(t *testing.T) {
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 
-	// 直接断言 checkActivityStreak：GET 失败 → 告警。
+	// Прямо assert'им checkActivityStreak: GET провалился — алертим.
 	if !s.checkActivityStreak(p.AuthByUID("u1")) {
-		t.Fatal("streak GET 失败应告警（reported but unverifiable）")
+		t.Fatal("провал streak GET должен алертить (reported but unverifiable)")
 	}
-	// 回读是只读 oracle：GET 失败不影响已发生的上报本轮走通（遍历继续）。
+	// Перечитывание — read-only oracle: провал GET не влияет на уже случившийся отчёт этого круга (обход продолжается).
 	if stub.streakHits.Load() != 1 {
-		t.Errorf("streak_hits=%d want 1（GET 失败也打了 streak 请求）", stub.streakHits.Load())
+		t.Errorf("streak_hits=%d want 1 (провал GET всё равно бьёт в streak)", stub.streakHits.Load())
 	}
 }
 
-// TestRunActivityNowSkipsSelfCheckOnReportFail 上报失败 → 不跑自检（SKIP，无意义回读）。
+// TestRunActivityNowSkipsSelfCheckOnReportFail: отчёт провалился — самопроверку не гоняем (SKIP, перечитывать бессмысленно).
 func TestRunActivityNowSkipsSelfCheckOnReportFail(t *testing.T) {
 	fastActivity(t)
 	var streakHits atomic.Int32
@@ -254,20 +254,20 @@ func TestRunActivityNowSkipsSelfCheckOnReportFail(t *testing.T) {
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 
-	s.RunActivityNow() // 不上报成功 → 无自检
+	s.RunActivityNow() // отчёт не успешен — самопроверки нет
 	if streakHits.Load() != 0 {
-		t.Errorf("streak hits=%d want 0（上报失败不跑自检）", streakHits.Load())
+		t.Errorf("streak hits=%d want 0 (провал отчёта — самопроверки нет)", streakHits.Load())
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 5 连发上报 + 领猫联动
+// Серия из 5 отчётов + связка со взятием питомца
 // ---------------------------------------------------------------------------
 
-// activityBurstStub 记录 /v2/report 的每条 requestId/conversationId，并模拟领猫路径
-// （buddy/info + agreement + buddy/first）与 streak 自检。
+// activityBurstStub пишет requestId/conversationId каждого /v2/report и имитирует путь взятия питомца
+// (buddy/info + agreement + buddy/first) и streak-самопроверку.
 type activityBurstStub struct {
-	reportBodies []map[string]any // 每条上报的 event
+	reportBodies []map[string]any // event каждого отчёта
 	infoCalls    atomic.Int32
 	firstCalls   atomic.Int32
 	agreeCalls   atomic.Int32
@@ -285,14 +285,14 @@ func (s *activityBurstStub) handler() http.Handler {
 			w.Write([]byte(`{"code":0,"msg":"OK"}`))
 		case "/activity/growth/buddy/info":
 			s.infoCalls.Add(1)
-			// 无猫 → 触发领养路径
+			// Нет питомца — уходим в путь взятия
 			w.Write([]byte(`{"code":0,"data":{"buddy":null}}`))
 		case "/activity/growth/buddy/agreement":
 			s.agreeCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"agreed":true}}`))
 		case "/activity/growth/buddy/first":
 			s.firstCalls.Add(1)
-			w.Write([]byte(`{"code":0,"data":{"buddy":{"id":1,"name":"档案喵"}}}`))
+			w.Write([]byte(`{"code":0,"data":{"buddy":{"id":1,"name":"档案喵"}}}`)) // данные: имя питомца-фикстуры (значение name), не переводим
 		case "/activity/growth/streak":
 			w.Write([]byte(`{"code":0,"data":{"streak":{"days":3}}}`))
 		default:
@@ -301,8 +301,8 @@ func (s *activityBurstStub) handler() http.Handler {
 	})
 }
 
-// TestRunActivityNowBurstSharedCIDIndependentRID 5 连发：共用同一 conversationId，
-// requestId 各条独立（同会话多轮）；5 条都成功后只一次 streak 自检。
+// TestRunActivityNowBurstSharedCIDIndependentRID: серия из 5 — общий conversationId,
+// requestId у каждого свой (многоходовка одной сессии); после успеха всех 5 — лишь одна streak-самопроверка.
 func TestRunActivityNowBurstSharedCIDIndependentRID(t *testing.T) {
 	fastActivity(t)
 	stub := &activityBurstStub{}
@@ -319,29 +319,29 @@ func TestRunActivityNowBurstSharedCIDIndependentRID(t *testing.T) {
 	if n := len(stub.reportBodies); n != 5 {
 		t.Fatalf("report bodies=%d want 5", n)
 	}
-	// 5 条共用同一 conversationId。
+	// Все 5 делят один conversationId.
 	cid := stub.reportBodies[0]["conversationId"]
 	for i, ev := range stub.reportBodies {
 		if ev["conversationId"] != cid {
-			t.Errorf("event %d conversationId=%v want %v（应共用同一会话）", i, ev["conversationId"], cid)
+			t.Errorf("event %d conversationId=%v want %v (должны делить одну сессию)", i, ev["conversationId"], cid)
 		}
 	}
-	// requestId 各条独立。
+	// requestId у каждого свой.
 	seen := map[any]bool{}
 	for i, ev := range stub.reportBodies {
 		rid := ev["requestId"]
 		if rid == cid {
-			t.Errorf("event %d requestId == conversationId（应独立）", i)
+			t.Errorf("event %d requestId == conversationId (должен быть независимым)", i)
 		}
 		if seen[rid] {
-			t.Errorf("event %d requestId=%v 重复（应各条独立）", i, rid)
+			t.Errorf("event %d requestId=%v дублируется (у каждого должен быть свой)", i, rid)
 		}
 		seen[rid] = true
 	}
 }
 
-// TestRunActivityNowBurstTriggersAdopt 无猫账号 5 连发上报后立即重试领养：
-// buddy/first 被调用且返回 ok（豁免 adoptTriedToday 当日防抖）。
+// TestRunActivityNowBurstTriggersAdopt: номер без питомца после серии из 5 сразу повторяет взятие:
+// buddy/first вызван и вернул ok (освобождён от дневного дебаунса adoptTriedToday).
 func TestRunActivityNowBurstTriggersAdopt(t *testing.T) {
 	fastActivity(t)
 	stub := &activityBurstStub{}
@@ -353,7 +353,7 @@ func TestRunActivityNowBurstTriggersAdopt(t *testing.T) {
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up, ActivityReportCount: 5})
 
-	// 先标记当日已试过领养（模拟旅行 09 点已 skip），验证上报后豁免防抖放行。
+	// Сначала помечаем, что сегодня взятие уже пробовали (имитируем skip путешествия в 09:00), проверяем, что после отчёта дебаунс снят и пропускает.
 	s.markAdoptTried("u1")
 	s.RunActivityNow()
 
@@ -361,17 +361,17 @@ func TestRunActivityNowBurstTriggersAdopt(t *testing.T) {
 		t.Errorf("report bodies=%d want 5", n)
 	}
 	if n := stub.infoCalls.Load(); n != 1 {
-		t.Errorf("buddy/info calls=%d want 1（上报后查有无猫）", n)
+		t.Errorf("buddy/info calls=%d want 1 (после отчёта проверяем наличие питомца)", n)
 	}
 	if n := stub.firstCalls.Load(); n != 1 {
-		t.Errorf("buddy/first calls=%d want 1（5 连发补满对话量后应重试领养）", n)
+		t.Errorf("buddy/first calls=%d want 1 (после добора объёма серией из 5 должны повторить взятие)", n)
 	}
 	if n := stub.agreeCalls.Load(); n != 1 {
 		t.Errorf("buddy/agreement calls=%d want 1", n)
 	}
 }
 
-// TestRunActivityNowBurstSkipsAdoptWhenBuddyExists 有猫账号上报后不触发领养。
+// TestRunActivityNowBurstSkipsAdoptWhenBuddyExists: номер с питомцем после отчёта взятие не триггерит.
 func TestRunActivityNowBurstSkipsAdoptWhenBuddyExists(t *testing.T) {
 	fastActivity(t)
 	var reportCalls atomic.Int32
@@ -381,10 +381,10 @@ func TestRunActivityNowBurstSkipsAdoptWhenBuddyExists(t *testing.T) {
 			reportCalls.Add(1)
 			w.Write([]byte(`{"code":0}`))
 		case "/activity/growth/buddy/info":
-			// 已有猫
-			w.Write([]byte(`{"code":0,"data":{"buddy":{"id":7,"name":"档案喵"}}}`))
+			// Питомец уже есть
+			w.Write([]byte(`{"code":0,"data":{"buddy":{"id":7,"name":"档案喵"}}}`)) // данные: имя питомца-фикстуры (значение name), не переводим
 		case "/activity/growth/buddy/first":
-			t.Errorf("有猫账号不应触发领养")
+			t.Errorf("номер с питомцем не должен триггерить взятие")
 		case "/activity/growth/streak":
 			w.Write([]byte(`{"code":0,"data":{"streak":{"days":3}}}`))
 		default:
@@ -404,7 +404,7 @@ func TestRunActivityNowBurstSkipsAdoptWhenBuddyExists(t *testing.T) {
 	}
 }
 
-// TestRunActivityNowBurstCountDefault1 缺省 ActivityReportCount=1 条（兼容旧行为）。
+// TestRunActivityNowBurstCountDefault1: по умолчанию ActivityReportCount=1 отчёт (совместимость со старым).
 func TestRunActivityNowBurstCountDefault1(t *testing.T) {
 	fastActivity(t)
 	stub := &reportStub{}
@@ -414,16 +414,16 @@ func TestRunActivityNowBurstCountDefault1(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	s := New(Config{Pool: p, Upstream: up}) // ActivityReportCount 缺省 → New 回落 1
+	s := New(Config{Pool: p, Upstream: up}) // ActivityReportCount по умолчанию — New откатывает к 1
 
 	s.RunActivityNow()
 	if n := stub.calls.Load(); n != 1 {
-		t.Errorf("report calls=%d want 1（缺省=1 兼容旧行为）", n)
+		t.Errorf("report calls=%d want 1 (дефолт=1, совместимость со старым)", n)
 	}
 }
 
-// TestRunActivityNowBurstBreakDoesNotSelfCheck 5 连发中途某条失败：剩余不发、
-// 不跑 streak 自检、不领养（ok==0）。
+// TestRunActivityNowBurstBreakDoesNotSelfCheck: в серии из 5 провалился средний — остаток не шлём,
+// streak-самопроверку не гоняем, не берём (ok==0).
 func TestRunActivityNowBurstBreakDoesNotSelfCheck(t *testing.T) {
 	fastActivity(t)
 	var reportCalls, streakHits, firstCalls atomic.Int32
@@ -431,7 +431,7 @@ func TestRunActivityNowBurstBreakDoesNotSelfCheck(t *testing.T) {
 		switch r.URL.Path {
 		case "/v2/report":
 			n := reportCalls.Add(1)
-			if n == 3 { // 第 3 条失败
+			if n == 3 { // 3-й провалился
 				w.WriteHeader(500)
 				w.Write([]byte(`boom`))
 				return
@@ -456,18 +456,18 @@ func TestRunActivityNowBurstBreakDoesNotSelfCheck(t *testing.T) {
 	s := New(Config{Pool: p, Upstream: up, ActivityReportCount: 5})
 
 	s.RunActivityNow()
-	if n := reportCalls.Load(); n != 3 { // 第 3 条失败后 break，不再续发
-		t.Errorf("report calls=%d want 3（第 3 条失败后 break）", n)
+	if n := reportCalls.Load(); n != 3 { // после провала 3-го — break, дальше не шлём
+		t.Errorf("report calls=%d want 3 (после провала 3-го — break)", n)
 	}
 	if streakHits.Load() != 0 {
-		t.Errorf("streak hits=%d want 0（上报未满不发）", streakHits.Load())
+		t.Errorf("streak hits=%d want 0 (отчёт не полон — не шлём)", streakHits.Load())
 	}
 	if firstCalls.Load() != 0 {
-		t.Errorf("first calls=%d want 0（上报未满不领养）", firstCalls.Load())
+		t.Errorf("first calls=%d want 0 (отчёт не полон — не берём)", firstCalls.Load())
 	}
 }
 
-// TestRunCheckinDoesNotTriggerTravel 签到收尾不再跑旅行（旅行已剥离为独立排程）。
+// TestRunCheckinDoesNotTriggerTravel: хвост подписания путешествия больше не гоняет (путешествия выделены в независимый план).
 func TestRunCheckinDoesNotTriggerTravel(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}
@@ -477,13 +477,13 @@ func TestRunCheckinDoesNotTriggerTravel(t *testing.T) {
 	s, _ := newTravelScheduler(t, srv, "u1")
 	s.RunCheckinNow()
 
-	// 签到不再顺带跑旅行：buddy/info 不应被调用。
+	// Подписание больше не тянет за собой путешествия: buddy/info не должен вызываться.
 	if n := stub.infoCalls.Load(); n != 0 {
-		t.Errorf("buddy/info calls=%d want 0（旅行已从签到剥离）", n)
+		t.Errorf("buddy/info calls=%d want 0 (путешествия отделены от подписания)", n)
 	}
 }
 
-// TestNextWakeTravelIndependent 旅行有独立时点，与签到互不影响。
+// TestNextWakeTravelIndependent: у путешествий независимая точка, с подписанием не влияют друг на друга.
 func TestNextWakeTravelIndependent(t *testing.T) {
 	s := New(Config{
 		CheckinHours:   []int{21},
@@ -493,14 +493,14 @@ func TestNextWakeTravelIndependent(t *testing.T) {
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（旅行 09:00 独立时点）", at, want)
+		t.Errorf("next=%v want %v (независимая точка путешествий 09:00)", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskTravel {
 		t.Errorf("kinds=%v want [travel]", kinds)
 	}
 }
 
-// TestNextWakeActivityIndependent 活跃上报有独立时点。
+// TestNextWakeActivityIndependent: у отчёта активности независимая точка.
 func TestNextWakeActivityIndependent(t *testing.T) {
 	s := New(Config{
 		CheckinHours:   []int{21},
@@ -510,14 +510,14 @@ func TestNextWakeActivityIndependent(t *testing.T) {
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（活跃 10:00 独立时点）", at, want)
+		t.Errorf("next=%v want %v (независимая точка активности 10:00)", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskActivity {
 		t.Errorf("kinds=%v want [activity]", kinds)
 	}
 }
 
-// TestNextWakeTravelDisabled 旅行禁用后排程里不再有旅行时点（签到照常）。
+// TestNextWakeTravelDisabled: после отключения путешествий точек путешествий в плане нет (подписание как было).
 func TestNextWakeTravelDisabled(t *testing.T) {
 	s := New(Config{
 		CheckinHours:   []int{9, 21},
@@ -526,38 +526,36 @@ func TestNextWakeTravelDisabled(t *testing.T) {
 		KeepaliveHours: []int{22},
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
-	// 旅行禁用 → 09:00 旅行时点不应出现，最近的是 09:00 签到（同小时但签到未禁用）。
+	// Путешествия отключены — точки 09:00 путешествий быть не должно, ближайшая — подписание 09:00 (тот же час, но подписание не отключено).
 	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if !hasKind(kinds, taskCheckin) {
-		t.Errorf("kinds=%v want 含 checkin", kinds)
+		t.Errorf("kinds=%v want содержит checkin", kinds)
 	}
 	if hasKind(kinds, taskTravel) {
-		t.Errorf("kinds=%v 不应含 travel（已禁用）", kinds)
+		t.Errorf("kinds=%v не должен содержать travel (отключён)", kinds)
 	}
 }
 
-// TestNextWakeActivityDisabled 活跃上报禁用后排程里不再有活跃时点。
+// TestNextWakeActivityDisabled: после отключения отчёта активности точек активности в плане нет.
 func TestNextWakeActivityDisabled(t *testing.T) {
 	s := New(Config{
 		CheckinHours:     []int{9, 21},
 		ActivityHours:    []int{10},
 		ActivityDisabled: true,
 		KeepaliveHours:   []int{22},
-		SchoolDisabled:   true,
-		CatDisabled:      true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（活跃禁用 → 跳过 10:00）", at, want)
+		t.Errorf("next=%v want %v (активность отключена — пропускаем 10:00)", at, want)
 	}
 	if hasKind(kinds, taskActivity) {
-		t.Errorf("kinds=%v 不应含 activity（已禁用）", kinds)
+		t.Errorf("kinds=%v не должен содержать activity (отключён)", kinds)
 	}
 }
 
-// TestCheckinDisabledTravelStillRuns 签到禁用时旅行/活跃照跑（验收标准 2）。
+// TestCheckinDisabledTravelStillRuns: при отключённом подписании путешествия/активность идут как были (критерий приёмки 2).
 func TestCheckinDisabledTravelStillRuns(t *testing.T) {
 	s := New(Config{
 		CheckinHours:    []int{9, 21},
@@ -568,25 +566,23 @@ func TestCheckinDisabledTravelStillRuns(t *testing.T) {
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（签到禁用，旅行 09:00 照跑）", at, want)
+		t.Errorf("next=%v want %v (подписание отключено, путешествия 09:00 идут как были)", at, want)
 	}
 	if hasKind(kinds, taskCheckin) {
-		t.Errorf("kinds=%v 不应含 checkin（已禁用）", kinds)
+		t.Errorf("kinds=%v не должен содержать checkin (отключён)", kinds)
 	}
 	if !hasKind(kinds, taskTravel) {
-		t.Errorf("kinds=%v 应含 travel（签到禁用但旅行独立）", kinds)
+		t.Errorf("kinds=%v должен содержать travel (подписание отключено, но путешествия независимы)", kinds)
 	}
 }
 
-// TestAllFourDisabledNoSpin 六类任务全禁用：Run 不空转。
+// TestAllFourDisabledNoSpin: все четыре класса отключены — Run не крутится вхолостую.
 func TestAllFourDisabledNoSpin(t *testing.T) {
 	s := New(Config{
 		CheckinDisabled:   true,
 		TravelDisabled:    true,
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
-		SchoolDisabled:    true,
-		CatDisabled:       true,
 		CheckinHours:      []int{9, 21},
 		TravelHours:       []int{9},
 		ActivityHours:     []int{10},
@@ -594,11 +590,11 @@ func TestAllFourDisabledNoSpin(t *testing.T) {
 	})
 	at, kinds := s.nextWake(time.Now())
 	if !at.IsZero() || len(kinds) != 0 {
-		t.Errorf("at=%v kinds=%v want zero/nil（六类全禁用）", at, kinds)
+		t.Errorf("at=%v kinds=%v want zero/nil (все четыре отключены)", at, kinds)
 	}
 }
 
-// TestNextWakeSameHourTravelAndCheckin 旅行与签到配到同一小时时两类任务都要执行。
+// TestNextWakeSameHourTravelAndCheckin: путешествия и подписание на одном часе — выполняем оба класса задач.
 func TestNextWakeSameHourTravelAndCheckin(t *testing.T) {
 	s := New(Config{
 		CheckinHours:   []int{9, 21},
@@ -611,15 +607,15 @@ func TestNextWakeSameHourTravelAndCheckin(t *testing.T) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if !hasKind(kinds, taskCheckin) || !hasKind(kinds, taskTravel) {
-		t.Errorf("kinds=%v want 含 checkin+travel（同 09:00 两任务）", kinds)
+		t.Errorf("kinds=%v want содержит checkin+travel (две задачи на 09:00)", kinds)
 	}
 }
 
-// TestRunDispatchesActivityAndTravel Run 到点分发 activity 与 travel（不真打上游，用空池）。
+// TestRunDispatchesActivityAndTravel: Run по времени раздаёт activity и travel (вверх по-настоящему не бьём, пул пуст).
 func TestRunDispatchesActivityAndTravel(t *testing.T) {
 	fastActivity(t)
 	fastTravel(t)
-	// 空 pool → RunActivityNow/RunTravelNow 遍历 0 账号即返回，不阻塞。
+	// Пустой pool — RunActivityNow/RunTravelNow обходят 0 номеров и возвращаются, не блокируясь.
 	p := pool.New("")
 	up := &upstream.Client{}
 	s := New(Config{
@@ -630,7 +626,7 @@ func TestRunDispatchesActivityAndTravel(t *testing.T) {
 		ActivityHours:  []int{},
 		KeepaliveHours: []int{},
 	})
-	// 六类全空 hours → nextWake 回落默认 → 会构造 timer，ctx 取消即返回。
+	// Все четыре hours пусты — nextWake откатывается к дефолту — строим timer, по отмене ctx возвращаемся.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { s.Run(ctx); close(done) }()
@@ -639,6 +635,6 @@ func TestRunDispatchesActivityAndTravel(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run 未在 ctx 取消后返回")
+		t.Fatal("Run не вернулся после отмены ctx")
 	}
 }

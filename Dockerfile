@@ -4,34 +4,29 @@ WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
-# 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
+# Собираем все бинарники за раз (инструменты едут в образ, скрипты можно гонять прямо в контейнере). Везде -trimpath -s -w.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/trial_bin ./cmd/trial \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/activity_bin ./cmd/activity
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit
 
 FROM alpine:3.20
-# python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体。
+# python3: разбор JSON / чек-ин / сохранение для login.sh; bash: для самих shell-скриптов.
 RUN apk add --no-cache wget ca-certificates tzdata python3 bash \
  && adduser -D -u 10001 app \
  && mkdir -p /app/auths /app/data \
  && chown -R app:app /app
 WORKDIR /app
-# 脚本置入 + 去 CRLF（Windows 检出可能性）在切到 app 之前以 root 完成——
-# app 对 root 所有文件无写权限，sed -i 需要写权限。
+# Скрипты кладём внутрь + режем CRLF (возможен checkout под Windows), завершить до переключения на app —
+# у app нет прав на запись в чужие root-файлы, а sed -i требует прав на запись.
 COPY --from=build /out/wb2api /app/wb2api
 COPY --from=build /out/signin_bin /app/signin_bin
 COPY --from=build /out/login /app/login
 COPY --from=build /out/credit /app/credit
-COPY --from=build /out/trial_bin /app/trial_bin
-COPY --from=build /out/activity_bin /app/activity_bin
-COPY login.sh signin.sh credit.sh trial.sh /app/
-# 国际版注册地区自动完善模块（login.sh global 分支 import；scripts/ 无测试/缓存）
-COPY scripts/global_region.py /app/scripts/global_region.py
-RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh /app/trial.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh /app/trial.sh
-# 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）
+COPY login.sh signin.sh credit.sh /app/
+COPY scripts/probe_active.py /app/scripts/probe_active.py
+RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
+# Образ без реальной конфигурации: example кладётся по умолчанию (в проде перекрывается монтом /app/config.json)
 COPY config.example.json /app/config.json
 USER app
 EXPOSE 7863

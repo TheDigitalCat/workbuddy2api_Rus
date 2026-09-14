@@ -65,6 +65,7 @@ func TestPrepareBodyInvalidJSON(t *testing.T) {
 	}
 }
 
+// Фикстура апстрима: содержимое на китайском (你好/世界), не менять.
 const sseFixture = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n" +
 	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，世界\"}}]}\n\n" +
 	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n" +
@@ -83,7 +84,7 @@ func TestAggregate(t *testing.T) {
 	}
 	choices := resp["choices"].([]any)
 	msg := choices[0].(map[string]any)["message"].(map[string]any)
-	if msg["content"] != "你好，世界" {
+	if msg["content"] != "你好，世界" { // ожидаемое значение апстрима на китайском, не менять
 		t.Errorf("content=%q", msg["content"])
 	}
 	if msg["role"] != "assistant" {
@@ -105,13 +106,14 @@ func TestAggregateSkipsNonDataLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
-	if msg["content"] != "你好，世界" {
+	if msg["content"] != "你好，世界" { // ожидаемое значение апстрима на китайском, не менять
 		t.Errorf("content=%q", msg["content"])
 	}
 }
 
 func TestAggregateToolCalls(t *testing.T) {
-	// 流式 tool_calls：首片带 id/type/name + 空 arguments，后续只带 arguments 片段
+	// Потоковые tool_calls: первый фрагмент несёт id/type/name + пустой arguments, дальше только куски arguments
+	// Ниже — фикстура апстрима с 北京 («Пекин»), не менять.
 	raw := `data: {"id":"x1","model":"deepseek-v4-pro","created":1,"choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_a","type":"function","function":{"name":"get_weather","arguments":""},"index":0}]}}],"usage":null}
 
 data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{\"city\":"},"index":0}]}}]}
@@ -143,132 +145,12 @@ data: [DONE]
 	if fn["name"] != "get_weather" {
 		t.Errorf("fn.name=%v", fn["name"])
 	}
-	if fn["arguments"] != `{"city":"北京"}` {
+	if fn["arguments"] != `{"city":"北京"}` { // ожидаемое значение апстрима на китайском, не менять
 		t.Errorf("fn.arguments=%q", fn["arguments"])
 	}
 }
 
-// TestBackfillToolCallNames 直测跨帧 name 缓存：首 chunk 带 name 时建缓存，
-// 后续 chunk 缺省/置空 name 时从缓存回填（hawklithm/workbuddy2api issue#2）。
-func TestBackfillToolCallNames(t *testing.T) {
-	mkFrame := func(name, args string) map[string]any {
-		fn := map[string]any{}
-		if name != "" {
-			fn["name"] = name
-		}
-		if args != "" {
-			fn["arguments"] = args
-		}
-		return map[string]any{"choices": []any{
-			map[string]any{"delta": map[string]any{"tool_calls": []any{
-				map[string]any{"index": 0.0, "function": fn},
-			}}},
-		}}
-	}
-	names := map[int]string{}
-
-	// 首 chunk 带 name：缓存建好
-	f0 := mkFrame("lookup", "")
-	backfillToolCallNames(f0, names)
-	if names[0] != "lookup" {
-		t.Fatalf("cache after first chunk=%v want lookup", names)
-	}
-
-	// 后续 chunk name 为空串：回填 "lookup"
-	f1 := mkFrame("", `{"term":"x"}`)
-	backfillToolCallNames(f1, names)
-	fn1 := f1["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
-	if fn1["name"] != "lookup" {
-		t.Errorf("empty name not backfilled: %v", fn1["name"])
-	}
-
-	// 后续 chunk 缺省 name（function 仅 arguments）：同样回填
-	f2 := map[string]any{"choices": []any{
-		map[string]any{"delta": map[string]any{"tool_calls": []any{
-			map[string]any{"index": 0.0, "function": map[string]any{"arguments": "y"}},
-		}}},
-	}}
-	backfillToolCallNames(f2, names)
-	fn2 := f2["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
-	if fn2["name"] != "lookup" {
-		t.Errorf("missing name not backfilled: %v", fn2["name"])
-	}
-
-	// 不同 index 互不串扰
-	f3 := map[string]any{"choices": []any{
-		map[string]any{"delta": map[string]any{"tool_calls": []any{
-			map[string]any{"index": 1.0, "function": map[string]any{}},
-		}}},
-	}}
-	backfillToolCallNames(f3, names)
-	if _, ok := names[1]; ok {
-		t.Error("index 1 should not get a cached name")
-	}
-	f3call := f3["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
-	if _, hasFn := f3call["function"]; !hasFn {
-		t.Error("index 1 with no cache should leave function empty (no phantom name)")
-	}
-
-	// 无缓存未命中：原帧原样不动
-	names2 := map[int]string{}
-	f4 := mkFrame("", `{"z":"1"}`)
-	backfillToolCallNames(f4, names2)
-	if json, _ := json.Marshal(f4); strings.Contains(string(json), "name") {
-		t.Errorf("uncached frame should not gain a name: %s", json)
-	}
-	// 非 tool_calls 帧（content only）零影响
-	f5 := map[string]any{"choices": []any{
-		map[string]any{"delta": map[string]any{"content": "hi"}},
-	}}
-	backfillToolCallNames(f5, names)
-	if got := f5["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any); len(got) != 1 || got["content"] != "hi" {
-		t.Errorf("content-only frame altered: %#v", got)
-	}
-}
-
-// TestStreamBackfillsToolCallName 端到端：SSE 流首 chunk 带 name，后续 chunk name 被置空，
-// 逐帧透传后每个工具分片都必须回填 name（hawklithm/workbuddy2api issue#2）。
-func TestStreamBackfillsToolCallName(t *testing.T) {
-	raw := "data: {\"id\":\"x1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n" +
-		"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"term\\\":\"}}]}}]}\n\n" +
-		"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"\\\"北京\\\"}\"}}]}}]}\n\n" +
-		"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"total_tokens\":9}}\n\n" +
-		"data: [DONE]\n\n"
-
-	frames, done := streamFrames(t, raw)
-	if done != 1 {
-		t.Fatalf("done=%d want 1", done)
-	}
-	if len(frames) != 4 {
-		t.Fatalf("frames=%d want 4", len(frames))
-	}
-	// 每个含 tool_calls 的分片 name 都必须是 lookup（首 chunk 直通，后续 chunk 被回填）
-	for i, fr := range frames {
-		chs, ok := fr["choices"].([]any)
-		if !ok {
-			t.Fatalf("frame %d choices missing", i)
-		}
-		d, _ := chs[0].(map[string]any)["delta"].(map[string]any)
-		tcs, ok := d["tool_calls"].([]any)
-		if !ok {
-			continue // 末帧只有 finish_reason，无 tool_calls 属正常
-		}
-		if len(tcs) != 1 {
-			t.Fatalf("frame %d tool_calls len=%d want 1", i, len(tcs))
-		}
-		fn, ok := tcs[0].(map[string]any)["function"].(map[string]any)
-		if !ok || fn["name"] != "lookup" {
-			t.Errorf("frame %d tool_calls name=%v want lookup", i, fn["name"])
-		}
-	}
-	// arguments 必须跨 chunk 完整保流（回填只动 name，不动其余字段）
-	f1 := frames[1]["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
-	if f1["arguments"] != `{"term":` {
-		t.Errorf("frame 2 arguments=%q", f1["arguments"])
-	}
-}
-
-// streamFrames 把原始 SSE 输入经 Stream 处理后解析出所有 JSON 帧及 [DONE] 计数。
+// streamFrames прогоняет сырой SSE-вход через Stream и разбирает все JSON-фреймы и счётчик [DONE].
 func streamFrames(t *testing.T, raw string) (frames []map[string]any, doneCount int) {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -297,7 +179,7 @@ func TestNormalizeFrame(t *testing.T) {
 	cases := []struct {
 		name string
 		in   map[string]any
-		want string // 规范化后 marshal 的期望 JSON（Go map 键按字典序输出）
+		want string // ожидаемый JSON после нормализации и marshal (ключи Go-map в словарном порядке)
 	}{
 		{"empty content/refusal and finish_reason empty string",
 			map[string]any{"id": "x", "choices": []any{
@@ -339,8 +221,9 @@ func TestNormalizeFrame(t *testing.T) {
 }
 
 func TestStreamNormalizesFrames(t *testing.T) {
-	// 混合噪声帧：空 content/reasoning/refusal/function_call + 空 tool_calls + 顶层非标字段，
-	// 随后非空 content + tool_calls 帧，最后 finish/usage 帧。
+	// Смешанные шумовые фреймы: пустые content/reasoning/refusal/function_call + пустой tool_calls + нестандартные поля верхнего уровня,
+	// затем фрейм с непустыми content + tool_calls, в конце фрейм finish/usage.
+	// Ниже — фикстура апстрима с 北京 («Пекин»), не менять.
 	raw := "data: {\"id\":\"x1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"\",\"refusal\":\"\",\"tool_calls\":[],\"function_call\":{\"name\":\"\",\"arguments\":\"\"}},\"finish_reason\":\"\"}],\"extra_field\":\"junk\"}\n\n" +
 		"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"北京\\\"}\"},\"index\":0}]},\"finish_reason\":\"\"}]}\n\n" +
 		"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":7}}\n\n" +
@@ -354,7 +237,7 @@ func TestStreamNormalizesFrames(t *testing.T) {
 		t.Fatalf("frames=%d want 3", len(frames))
 	}
 
-	// 帧 1：噪声全剔除，finish_reason ""→null，usage 缺失→null，顶层非标字段剥除
+	// Фрейм 1: весь шум вычищен, finish_reason ""→null, отсутствующий usage→null, нестандартные поля верхнего уровня сняты
 	f0 := frames[0]
 	if _, ok := f0["extra_field"]; ok {
 		t.Error("top-level extra_field should be dropped")
@@ -367,7 +250,7 @@ func TestStreamNormalizesFrames(t *testing.T) {
 		t.Errorf("frame1 finish_reason=%v want null", ch0["finish_reason"])
 	}
 	d := ch0["delta"].(map[string]any)
-	// role 是合法白名单键保留；空 content/reasoning/refusal/tool_calls/function_call 噪声全剔除
+	// role как легальный ключ белого списка сохраняем; шум пустых content/reasoning/refusal/tool_calls/function_call вычищаем целиком
 	if len(d) != 1 || d["role"] != "assistant" {
 		t.Errorf("frame1 delta should only keep role, got %#v", d)
 	}
@@ -377,7 +260,7 @@ func TestStreamNormalizesFrames(t *testing.T) {
 		}
 	}
 
-	// 帧 2：非空 content 与 tool_calls 保留，finish_reason ""→null
+	// Фрейм 2: непустые content и tool_calls сохраняем, finish_reason ""→null
 	f1 := frames[1]
 	ch1 := f1["choices"].([]any)[0].(map[string]any)
 	d1 := ch1["delta"].(map[string]any)
@@ -392,7 +275,7 @@ func TestStreamNormalizesFrames(t *testing.T) {
 		t.Errorf("frame2 finish_reason=%v want null (input empty string)", ch1["finish_reason"])
 	}
 
-	// 帧 3：finish_reason 非空保留，usage 保留
+	// Фрейм 3: непустой finish_reason сохраняем, usage сохраняем
 	f2 := frames[2]
 	ch2 := f2["choices"].([]any)[0].(map[string]any)
 	if ch2["finish_reason"] != "stop" {
@@ -403,51 +286,8 @@ func TestStreamNormalizesFrames(t *testing.T) {
 	}
 }
 
-// TestStreamFirstIdPassthrough 帧混合（首帧有 id / 中间帧无 id / 空串 id）：输出每帧 id
-// 必须连续一致（取首帧真实值），不再一律 chatcmpl-wb2api（issue #35 后台聚合：透传流里
-// 每帧同 id 才能按消息归并）。
-func TestStreamFirstIdPassthrough(t *testing.T) {
-	raw := "data: {\"id\":\"chatcmpl-upstream-9\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n" +
-		// 中间帧无 id：应复用首帧 id。
-		"data: {\"object\":\"chat.completion.chunk\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n" +
-		// 中间帧 id 为空串：同样复用首帧 id。
-		"data: {\"id\":\"\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\n" +
-		"data: [DONE]\n\n"
-
-	frames, done := streamFrames(t, raw)
-	if done != 1 {
-		t.Fatalf("done=%d want 1", done)
-	}
-	if len(frames) != 3 {
-		t.Fatalf("frames=%d want 3", len(frames))
-	}
-	for i, fr := range frames {
-		if got := fr["id"]; got != "chatcmpl-upstream-9" {
-			t.Errorf("frame %d id=%v want chatcmpl-upstream-9 (首帧真实 id 续传)", i, got)
-		}
-	}
-}
-
-// TestStreamNoIdFallsBackToSentinel 全流无任何真实 id → 兜底 chatcmpl-wb2api
-// （整流无 id 时的既有哨兵，帧与帧之间仍一惯性存在）。
-func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
-	raw := "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
-		"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{}," +
-		"\"finish_reason\":\"stop\"}]}\n\n" +
-		"data: [DONE]\n\n"
-	frames, _ := streamFrames(t, raw)
-	if len(frames) != 2 {
-		t.Fatalf("frames=%d want 2", len(frames))
-	}
-	for i, fr := range frames {
-		if got := fr["id"]; got != "chatcmpl-wb2api" {
-			t.Errorf("frame %d id=%v want sentinel chatcmpl-wb2api (无真实 id)", i, got)
-		}
-	}
-}
-
 func TestStreamDoneFallback(t *testing.T) {
-	// 上游流在无 [DONE] 时 EOF，Stream 必须兜底写一个 [DONE]
+	// При EOF восходящего потока без [DONE] Stream обязан добить один [DONE]
 	rec := httptest.NewRecorder()
 	err := Stream(rec, strings.NewReader("data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
 	if err != nil {
@@ -458,7 +298,7 @@ func TestStreamDoneFallback(t *testing.T) {
 		t.Errorf("missing [DONE] fallback: %q", body)
 	}
 
-	// 已有 [DONE] 时只写一次，不重复
+	// При уже имеющемся [DONE] пишем ровно один раз, без дублей
 	rec2 := httptest.NewRecorder()
 	if err := Stream(rec2, strings.NewReader("data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")); err != nil {
 		t.Fatal(err)
@@ -475,10 +315,10 @@ func TestStreamPassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "你好") || !strings.Contains(body, "data: [DONE]") {
+	if !strings.Contains(body, "你好") || !strings.Contains(body, "data: [DONE]") { // проверка фикстуры на китайском (你好), не менять
 		t.Errorf("body missing chunks: %q", body)
 	}
-	// 逐行仍是合法 SSE（每行以 data: 开头或是空行）
+	// Построчно всё равно валидный SSE (каждая строка начинается с data: либо пустая)
 	for _, ln := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
 		if ln != "" && !strings.HasPrefix(ln, "data: ") {
 			t.Errorf("bad line: %q", ln)
@@ -490,10 +330,10 @@ func TestStreamPassthrough(t *testing.T) {
 	}
 }
 
-// TestAggregateEmptyStreamCases 覆盖空流检测：0 有效事件必须报错、[DONE] 即 break、
-// [DONE] 后垃圾不进聚合、正常聚合回归。
+// TestAggregateEmptyStreamCases накрывает детект пустого потока: 0 валидных событий обязаны дать ошибку, [DONE] — это break,
+// мусор после [DONE] в агрегацию не идёт, нормальная агрегация — регрессия.
 func TestAggregateEmptyStreamCases(t *testing.T) {
-	// 正常回归基流：content + finish_reason + usage，[DONE] 收尾。
+	// Нормальный регрессионный базовый поток: content + finish_reason + usage, в конце [DONE].
 	valid := "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":7}}\n\n" +
 		"data: [DONE]\n\n"
@@ -502,30 +342,30 @@ func TestAggregateEmptyStreamCases(t *testing.T) {
 		name    string
 		raw     string
 		wantErr bool
-		// 回归断言（仅在 wantErr=false 时校验）
+		// Регрессионные проверки (только при wantErr=false)
 		wantContent string
 		wantUsage   float64
 	}{
 		{
-			name:    "空流（EOF 即止）",
+			name:    "пустой поток (стоп на EOF)",
 			raw:     "",
 			wantErr: true,
 		},
 		{
-			name:    "只有注释行和空行加 DONE",
+			name:    "только строки-комментарии и пустые строки плюс DONE",
 			raw:     ": comment\n\n: another comment\n\ndata: [DONE]\n\n",
 			wantErr: true,
 		},
 		{
-			name:    "DONE 后跟垃圾帧不进聚合",
+			name:    "мусорный фрейм после DONE в агрегацию не идёт",
 			raw:     valid[:len(valid)-len("data: [DONE]\n\n")] + "data: [DONE]\n\ndata: {\"junk\":\"should not aggregate\"}\n\n",
 			wantErr: false,
-			// 与 valid 基流一致的聚合期望
+			// ожидания агрегации как у базового потока valid
 			wantContent: "hi",
 			wantUsage:   7,
 		},
 		{
-			name:        "正常流回归",
+			name:        "регрессия нормального потока",
 			raw:         valid,
 			wantErr:     false,
 			wantContent: "hi",
@@ -559,7 +399,7 @@ func TestAggregateEmptyStreamCases(t *testing.T) {
 	}
 }
 
-// TestAggregateEmptyStreamError 校验空流错误信息形如约定文案。
+// TestAggregateEmptyStreamError проверяет, что текст ошибки пустого потока соответствует договорной формулировке.
 func TestAggregateEmptyStreamError(t *testing.T) {
 	_, err := Aggregate(strings.NewReader(""))
 	if err == nil || !strings.Contains(err.Error(), "no valid data events") {
@@ -567,16 +407,16 @@ func TestAggregateEmptyStreamError(t *testing.T) {
 	}
 }
 
-// TestStreamEmptyFramesCase 覆盖流式空流检测：0 有效帧时写 error 帧（error 字段存活）,
-// 恰好一个 [DONE]，并返回非 nil error。
+// TestStreamEmptyFramesCase накрывает детект пустого потокового потока: при 0 валидных фреймов пишем error-фрейм (поле error живёт),
+// ровно один [DONE] и возвращаем не-nil ошибку.
 func TestStreamEmptyFramesCase(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
 	}{
-		{"空流", ""},
-		{"只有注释行", ": comment\n\n"},
-		{"只有 DONE", "data: [DONE]\n\n"},
+		{"пустой поток", ""},
+		{"только строки-комментарии", ": comment\n\n"},
+		{"только DONE", "data: [DONE]\n\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -589,7 +429,7 @@ func TestStreamEmptyFramesCase(t *testing.T) {
 			if n := strings.Count(body, "data: [DONE]"); n != 1 {
 				t.Errorf("[DONE] count=%d want 1: %q", n, body)
 			}
-			// error 帧必须原样保留 error 字段（未被 normalizeFrame 白名单剥掉）
+			// error-фрейм обязан сохранить поле error как есть (белый список normalizeFrame его не снял)
 			var e map[string]any
 			found := false
 			for _, ln := range strings.Split(body, "\n") {
@@ -613,7 +453,7 @@ func TestStreamEmptyFramesCase(t *testing.T) {
 	}
 }
 
-// TestStreamGarbageAfterDone 校验 DONE 之后的垃圾帧不出现在响应里。
+// TestStreamGarbageAfterDone проверяет, что мусорные фреймы после DONE не попадают в ответ.
 func TestStreamGarbageAfterDone(t *testing.T) {
 	raw := "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n" +
 		"data: [DONE]\n\n" +
@@ -629,21 +469,21 @@ func TestStreamGarbageAfterDone(t *testing.T) {
 	if n := strings.Count(body, "data: [DONE]"); n != 1 {
 		t.Errorf("[DONE] count=%d want 1: %q", n, body)
 	}
-	// 有效帧仍被透传
+	// валидный фрейм всё равно проксируется
 	if !strings.Contains(body, "hello") {
 		t.Errorf("valid frame missing: %q", body)
 	}
 }
 
-// TestStreamNormalPassthroughRegression 校验正常透传回归：帧被 normalize 后透传、
-// 末尾恰好一个 [DONE]、无 error 帧；上游漏发 DONE 时自动补。
+// TestStreamNormalPassthroughRegression проверяет регрессию нормальной проксировки: фреймы идут через normalize,
+// в конце ровно один [DONE], без error-фреймов; при непоставленном апстримом DONE добиваем сами.
 func TestStreamNormalPassthroughRegression(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
 	}{
-		{"带 DONE 的正常流", sseFixture},
-		{"漏发 DONE 自动补", "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"},
+		{"нормальный поток с DONE", sseFixture},
+		{"неприсланный DONE добиваем сами", "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -658,7 +498,7 @@ func TestStreamNormalPassthroughRegression(t *testing.T) {
 			if n := strings.Count(body, "data: [DONE]"); n != 1 {
 				t.Errorf("[DONE] count=%d want 1: %q", n, body)
 			}
-			// 帧被规范化：含 "id" 且有标准 object 字段
+			// Фрейм нормализован: содержит "id" и стандартное поле object
 			if !strings.Contains(body, `"object":"chat.completion.chunk"`) {
 				t.Errorf("frame not normalized: %q", body)
 			}

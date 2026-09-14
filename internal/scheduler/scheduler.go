@@ -1,5 +1,5 @@
-// Package scheduler 定时任务：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 六类独立排程。
-// 签到成功后重新查余额，余额 > 0 的冷却账号自动解冻。
+// Package scheduler — плановые задачи: подписание / отчёт об активности / путешествие питомца / token keepalive, четыре независимых расписания.
+// После успешного подписания заново запрашиваем баланс, охлаждаемые номера с балансом > 0 автоматически размораживаем.
 package scheduler
 
 import (
@@ -16,52 +16,46 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// Config 调度器依赖。
+// Config — зависимости планировщика.
 //
-// 任务开关用「禁用」命名而非「启用」：零值 Config 即六类任务都启用（hours 回落默认），
-// 与引入开关前的行为逐字一致（老调用方/老测试无需改动）。
+// Переключатели задач названы через «отключение», а не «включение»: нулевой Config означает все четыре задачи включены (hours откатываются к умолчанию),
+// поведение побуквенно совпадает с эпохой до переключателей (старым вызывающим/тестам меняться не надо).
 type Config struct {
 	Pool           *pool.Pool
 	Upstream       *upstream.Client
-	CheckinHours   []int // 默认 [9, 21]
-	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
-	ActivityHours  []int // 默认 [10]
-	KeepaliveHours []int // 默认 [22]
-	SchoolHours    []int // 默认 [12]：开学季任务（迁移自系统 crontab）
-	CatHours       []int // 默认 [1]：夜猫子任务（迁移自系统 crontab）
-	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
-	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
+	CheckinHours   []int // по умолчанию [9, 21]
+	TravelHours    []int // по умолчанию [9,21]: одна отправка + одно получение закрывают цикл
+	ActivityHours  []int // по умолчанию [10]
+	KeepaliveHours []int // по умолчанию [22]
+	// ActivityReportCount — число отчётов активности на номер за раз: взять питомца требует 5 диалогов,
+	// по умолчанию 5 отчётов в одном conversationId многходовкой добивают chat_5; 0/по умолчанию=1 ради совместимости со старым поведением.
 	ActivityReportCount int
 
-	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
-	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
+	// CheckinDisabled явно выключает расписание подписания (соответствует schedule.checkin_enabled=false в config).
+	// После отключения точек подписания больше нет. Путешествие больше не едет зайцем на подписании (выделено в независимое расписание).
 	CheckinDisabled bool
-	// TravelDisabled 显式关闭猫猫旅行排程（schedule.travel_enabled=false）。
+	// TravelDisabled явно выключает расписание путешествий питомца (schedule.travel_enabled=false).
 	TravelDisabled bool
-	// ActivityDisabled 显式关闭活跃上报排程（schedule.activity_enabled=false）。
+	// ActivityDisabled явно выключает расписание отчётов активности (schedule.activity_enabled=false).
 	ActivityDisabled bool
-	// KeepaliveDisabled 显式关闭 token 保活排程（schedule.keepalive_enabled=false）。
+	// KeepaliveDisabled явно выключает расписание поддержания token (schedule.keepalive_enabled=false).
 	KeepaliveDisabled bool
-	// SchoolDisabled 显式关闭开学季任务排程（schedule.school_enabled=false）。
-	SchoolDisabled bool
-	// CatDisabled 显式关闭夜猫子任务排程（schedule.cat_enabled=false）。
-	CatDisabled bool
 }
 
-// Scheduler 调度器。
+// Scheduler — планировщик.
 type Scheduler struct {
 	cfg Config
 
-	// mu/adoptTried 领养当日失败记录：uid → 自然日（CST）。门槛未达的账号当日不再重试，
-	// 避免同日多趟对上游重试轰炸；进程重启即清零（无需持久化）。
+	// mu/adoptTried — журнал дневных неудач взятия: uid → календарный день (CST). Номера, не прошедшие порог, в этот день больше не пробуем,
+	// чтобы не бомбардировать апстрим повторами несколько раз в день; при рестарте процесса обнуляется (персистентность не нужна).
 	mu         sync.Mutex
 	adoptTried map[string]string
 
-	// checkinMu 串行化签到：定时入口与手动触发互斥，避免同一时刻重复打上游签到接口。
+	// checkinMu сериализует подписания: плановый вход и ручной запуск взаимоисключают друг друга, чтобы не бить интерфейс подписания апстрима дважды в один момент.
 	checkinMu sync.Mutex
 }
 
-// New 构建。
+// New создаёт.
 func New(cfg Config) *Scheduler {
 	if len(cfg.CheckinHours) == 0 {
 		cfg.CheckinHours = []int{9, 21}
@@ -75,46 +69,40 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
 	}
-	if len(cfg.SchoolHours) == 0 {
-		cfg.SchoolHours = []int{12}
-	}
-	if len(cfg.CatHours) == 0 {
-		cfg.CatHours = []int{1}
-	}
-	// 0/缺省 = 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
+	// 0/по умолчанию = 1 отчёт (совместимость со старым: один отчёт в день на номер поддерживает серию входов).
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
 	}
 	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string)}
 }
 
-// checkinRefreshSkew 签到前判定"token 是否临近过期"的时间窗口（10 分钟）。
-// 长时间停机/容器长期停跑后 access token 往往已过期，不先刷新则签到必然 401 白跑。
+// checkinRefreshSkew — окно «истекает ли token скоро» перед подписанием (10 минут).
+// После долгого простоя/долгой остановки контейнера access token обычно уже протух, без предварительного обновления подписание впустую получит 401.
 const checkinRefreshSkew = 10 * time.Minute
 
-// CheckinStatus 单账号签到结果状态。
+// CheckinStatus — статус результата подписания одного номера.
 type CheckinStatus string
 
 const (
-	CheckinOK      CheckinStatus = "ok"      // 签到成功
-	CheckinAlready CheckinStatus = "already" // 上游判定今天已签到（幂等重复，视为正常）
-	CheckinFail    CheckinStatus = "fail"    // 刷新 token / 签到 / 余额查询失败
-	CheckinSkipped CheckinStatus = "skipped" // 禁用账号或无有效凭证，未参与
+	CheckinOK      CheckinStatus = "ok"      // подписание успешно
+	CheckinAlready CheckinStatus = "already" // апстрим решил, что сегодня уже подписано (идемпотентный повтор, считаем нормой)
+	CheckinFail    CheckinStatus = "fail"    // не удалось обновить token / подписаться / запросить баланс
+	CheckinSkipped CheckinStatus = "skipped" // номер отключён или нет валидных учётных данных, не участвовал
 )
 
-// CheckinOutcome 单账号签到结果（供手动签到回执与日志汇总）。
+// CheckinOutcome — результат подписания одного номера (для ручной квитанции и сводки логов).
 type CheckinOutcome struct {
 	UID      string         `json:"uid"`
 	Nickname string         `json:"nickname,omitempty"`
 	Status   CheckinStatus  `json:"status"`
-	Credits  *int64         `json:"credits,omitempty"` // 签到后余额（余额查询成功才有值）
-	Detail   string         `json:"detail,omitempty"`  // 失败/跳过原因（"已签到"不填）
+	Credits  *int64         `json:"credits,omitempty"` // баланс после подписания (есть только при успешном запросе баланса)
+	Detail   string         `json:"detail,omitempty"`  // причина неудачи/пропуска (цитату апстрима «已签到» не заполняем)
 }
 
-// ErrBusy 已有一次签到正在执行（手动入口与定时撞车）。
-var ErrBusy = errors.New("checkin already running")
+// ErrBusy — подписание уже выполняется (ручной вход столкнулся с плановым).
+var ErrBusy = errors.New("подписание уже выполняется")
 
-// nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
+// nextFire возвращает ближайшее после now целочасовое время срабатывания; hours — локальные часы (0-23).
 func nextFire(now time.Time, hours []int) time.Time {
 	var earliest time.Time
 	for _, h := range hours {
@@ -129,7 +117,7 @@ func nextFire(now time.Time, hours []int) time.Time {
 	return earliest
 }
 
-// taskKind 调度任务类型。
+// taskKind — тип плановой задачи.
 type taskKind int
 
 const (
@@ -137,13 +125,11 @@ const (
 	taskTravel
 	taskActivity
 	taskKeepalive
-	taskSchool
-	taskCat
 )
 
-// nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
-// 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
-// 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
+// nextWake возвращает ближайшее после now время пробуждения и все задачи, которые в этот момент надо выполнить.
+// Если несколько классов задач назначены на один час (например подписание и путешествие содержат 9), в этот момент выполняются все.
+// Явно отключённые задачи в кандидаты не попадают (nextFire для них возвращает нулевое время, nextWake нулевые точки пропускает).
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	type slot struct {
 		at   time.Time
@@ -161,12 +147,6 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	if !s.cfg.KeepaliveDisabled {
 		slots = append(slots, slot{nextFire(now, s.cfg.KeepaliveHours), taskKeepalive})
-	}
-	if !s.cfg.SchoolDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.SchoolHours), taskSchool})
-	}
-	if !s.cfg.CatDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.CatHours), taskCat})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -189,12 +169,12 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	return earliest, kinds
 }
 
-// Run 主循环，阻塞直到 ctx 取消。
+// Run — главный цикл, блокируется до отмены ctx.
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		next, kinds := s.nextWake(time.Now())
 		if next.IsZero() {
-			// 六类任务全部禁用：不空转，只等退出信号。
+			// Все четыре класса задач отключены: не крутимся вхолостую, только ждём сигнал выхода.
 			<-ctx.Done()
 			return
 		}
@@ -204,46 +184,36 @@ func (s *Scheduler) Run(ctx context.Context) {
 			timer.Stop()
 			return
 		case <-timer.C:
-			// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
+			// Задачи на точку фиксируются при планировании (не зависят от часа момента пробуждения), опоздавшее пробуждение ничего не пропустит.
 			for _, k := range kinds {
-				s.dispatch(k)
+				switch k {
+				case taskCheckin:
+					s.RunCheckinNow()
+				case taskTravel:
+					s.RunTravelNow()
+				case taskActivity:
+					s.RunActivityNow()
+				case taskKeepalive:
+					s.RunKeepaliveNow()
+				}
 			}
 		}
 	}
 }
 
-// dispatch 按任务类型分发到对应执行函数。脚本类（school/cat）失败只记 WARN、
-// 不影响其余任务继续执行（与现有各任务"单账号失败不阻断遍历"同口径）。
-func (s *Scheduler) dispatch(k taskKind) {
-	switch k {
-	case taskCheckin:
-		s.RunCheckinNow()
-	case taskTravel:
-		s.RunTravelNow()
-	case taskActivity:
-		s.RunActivityNow()
-	case taskKeepalive:
-		s.RunKeepaliveNow()
-	case taskSchool:
-		s.RunSchoolNow()
-	case taskCat:
-		s.RunCatNow()
-	}
-}
-
-// RunCheckinNow 定时触发的立即签到：逐账号结果由 CheckinAll 记日志，此处只兜住"撞车跳过"。
+// RunCheckinNow — немедленное подписание по таймеру: пономерные итоги логирует CheckinAll, здесь лишь ловим «пропуск из-за столкновения».
 func (s *Scheduler) RunCheckinNow() {
 	if _, err := s.CheckinAll(); err != nil {
-		log.Printf("scheduled checkin skipped: %v", err)
+		log.Printf("плановое подписание пропущено: %v", err)
 	}
 }
 
-// CheckinAll 全量签到：按需刷新 token → daily-checkin → 查余额 → 解冻冷却账号。
-// 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
-// 同一时刻只允许一次签到在跑，重复调用返回 ErrBusy（防止手动触发与定时撞车重复打上游）。
+// CheckinAll — полное подписание: обновление token по нужде → daily-checkin → запрос баланса → разморозка охлаждаемых номеров.
+// Охлаждаемые номера тоже участвуют (подписание и нужно, чтобы их разморозить); отключённые пропускаем.
+// В один момент разрешено только одно подписание, повторный вызов возвращает ErrBusy (чтобы ручной запуск и таймер не били апстрим дважды).
 //
-// session dead 走 Pool.NoteSessionDead 的**连续计数**语义（与 keepalive 一致）：
-// 一次刷新失败不再立即杀号，连续 sessionDeadThreshold 次才禁用，刷新成功清计数。
+// session dead идёт по семантике **непрерывного счёта** Pool.NoteSessionDead (как keepalive):
+// одна неудача обновления больше не убивает номер сразу, отключаем после подряд sessionDeadThreshold раз, успех обновления обнуляет счёт.
 func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	if !s.checkinMu.TryLock() {
 		return nil, ErrBusy
@@ -268,46 +238,34 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
-		// D4 门控：realm=global 账号无签到体系/任务中心，直接跳过（不发起任何上游调用，避免风控）。
-		// 经 auth.Realm() 统一判定：逃生门（global.enabled=false）下 global 账号被降级为 cn、
-		// 按 CN 处理——这是 D5 逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
-		if a.IsGlobal() {
-			oc.Status, oc.Detail = CheckinSkipped, "global"
-			skipN++
-			out = append(out, oc)
-			continue
-		}
-		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
+		// Если простой пересёк срок жизни token (ночная остановка/долгий простой контейнера) — сначала догоняющее обновление, иначе подписание впустую получит 401.
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
-				log.Printf("checkin %s refresh: %v", logfmt.UID8(st.UID), err)
+				log.Printf("checkin %s обновление: %v", logfmt.UID8(st.UID), err)
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 					if s.cfg.Pool.NoteSessionDead(st.UID) {
-						log.Printf("WARN: checkin %s: 连续 %d 次 12153 session dead — 禁用", logfmt.UID8(st.UID), pool.SessionDeadThreshold())
+						log.Printf("WARN: checkin %s: %d раз подряд 12153 session dead — отключение", logfmt.UID8(st.UID), pool.SessionDeadThreshold())
 					}
 				}
-				// 刷新只是"提前补票"：token 若仍有效，继续照常签到（否则刷新接口抖动
-				// 会让本可成功的签到被白白跳过）；真正过期才判定失败。
+				// Обновление — лишь «досрочный добор билета»: если token ещё валиден, подписываемся как обычно (иначе джиттер интерфейса обновления
+				// зря пропустил бы подписание, которое могло успеть); неудачей считаем только истинное истечение.
 				if a.NeedsRefresh(0) {
 					oc.Status, oc.Detail = CheckinFail, "refresh: "+err.Error()
 					failN++
 					out = append(out, oc)
 					continue
 				}
-			} else {
-				a.BackfillRealm() // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
-				if err := a.SaveAtomic(); err != nil {
-					// 刷新成功但落盘失败：重启会用旧 token，必须暴露。
-					log.Printf("checkin %s save: %v", logfmt.UID8(st.UID), err)
-				}
+			} else if err := a.SaveAtomic(); err != nil {
+				// Обновили успешно, но на диск не сохранили: после рестарта будет старый token — такое надо показать.
+				log.Printf("checkin %s сохранение: %v", logfmt.UID8(st.UID), err)
 			}
 		}
-		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
+		// При ошибке подписания (включая цитату апстрима «今天已签到») всё равно запрашиваем баланс: восстановился — номер размораживаем.
 		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
 			if upstream.IsAlreadyCheckin(err) {
-				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
-				// 出现一整段 400 报文、被误读成签到失败。
+				// цитата апстрима «今天已签到» — идемпотентный успех, а не ошибка: detail не заполняем, чтобы в квитанции
+				// не красовался целый кусок 400-ответа, который прочтут как провал подписания.
 				oc.Status = CheckinAlready
 			} else {
 				oc.Status = CheckinFail
@@ -338,12 +296,12 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		}
 		out = append(out, oc)
 	}
-	log.Printf("checkin done: total=%d ok=%d already=%d fail=%d skipped=%d",
+	log.Printf("подписание завершено: всего=%d успешно=%d уже=%d ошибок=%d пропущено=%d",
 		len(statuses), okN, alreadyN, failN, skipN)
 	return out, nil
 }
 
-// joinDetail 拼接多段原因，避免后一段覆盖前一段的失败信息。
+// joinDetail склеивает несколько фрагментов причины, чтобы поздний не затирал раннюю информацию о неудаче.
 func joinDetail(existing, add string) string {
 	if existing == "" {
 		return add
@@ -351,22 +309,20 @@ func joinDetail(existing, add string) string {
 	return existing + "; " + add
 }
 
-// RunActivityNow 立即对池内所有可用账号执行对话活跃上报。
-// 禁用账号跳过；无 AccessToken 的跳过；账号间限速 activityAccountDelay。
-// CN 与 global 账号**都上报**（PR #45 实测国际版 /v2/report 可用）；单账号失败
-// 只记 WARN 不影响遍历。
+// RunActivityNow немедленно выполняет отчёт диалоговой активности по всем доступным номерам пула.
+// Отключённые номера пропускаем; без AccessToken пропускаем; между номерами — лимит скорости activityAccountDelay.
 //
-// 每号上报 N 条（ActivityReportCount，默认 5）：N 条共用同一 conversationId
-// （wb2api-<ms>），模拟同一会话内 N 轮对话——这是领养猫（buddy/first）对话量
-// 门槛的实测刷法（chat_5 前置需 5 次对话）。requestId 各条独立（同会话多轮）。
-// 账号内 N 条之间间隔 activityReportGap（1.5s）避免秒发触发风控。
+// Каждый номер отчитывается N раз (ActivityReportCount, по умолчанию 5): все N делят один conversationId
+// (wb2api-<ms>), имитируя N кругов диалога в одной сессии, — это намеренный приём для порога диалогов взятия питомца (buddy/first)
+// (пререквизит chat_5 требует 5 диалогов). requestId у каждого свой (многходовка одной сессии).
+// Между N отчётами одного номера — пауза activityReportGap (1.5s), чтобы мгновенная отправка не триггерила антифрод.
 //
-// 0/缺省 ActivityReportCount = 1 条，兼容旧行为（仅点亮连登 + 解锁 first_buddy）。
+// 0/по умолчанию ActivityReportCount = 1 отчёт, совместимость со старым (только поддержать серию входов + разблокировать first_buddy).
 //
-// 上报成功后：① streak 自检（回读连登，发现「200 但静默丢弃」）；
-// ② 无猫账号立即重试领养（travelAdoptForce）——对话量刚补满的新状态，不算重试，
-// 豁免 adoptTriedToday 当日防抖（旅行排程 09 点已领养过且 skip，10 点上报补满后
-// 不能依赖下一轮旅行领养，就地闭环）。
+// После успешного отчёта: ① самопроверка streak (перечитываем серию входов, ловим «200, но молча выброшено»);
+// ② номера без питомца сразу повторяют взятие (travelAdoptForce) — объём диалогов только что добрали, это новое состояние, а не повтор,
+// освобождаем от дневного дебаунса adoptTriedToday (путешествие в 09:00 уже пыталось взять и пропустило, в 10:00 отчёт добрался
+// и ждать следующего круга путешествия нельзя — замыкаем на месте).
 func (s *Scheduler) RunActivityNow() {
 	count := s.cfg.ActivityReportCount
 	first := true
@@ -378,61 +334,58 @@ func (s *Scheduler) RunActivityNow() {
 		if a == nil || a.AccessToken == "" {
 			continue
 		}
-		// global 账号同样上报（PR #45 实测国际版 /v2/report 在 workbuddy.ai 上 code=0 OK，
-		// 点亮连登）；realmBase 路由/头由 upstream.billingJSON/BillingHeaders 按 realm 切。
-		// 单账号失败只记 WARN 不影响遍历（下方 report err → break 该号 → continue 下号）。
 		if !first {
 			time.Sleep(activityAccountDelay)
 		}
 		first = false
-		// N 条共用同一 conversationId（同会话），requestId 各自独立（每条一个）。
+		// Все N делят один conversationId (одна сессия), requestId у каждого свой (по одному на отчёт).
 		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
 		ok := 0
 		for i := 1; i <= count; i++ {
 			rid := fmt.Sprintf("%s-r%d", cid, i)
 			if err := s.cfg.Upstream.ReportChatActivity(a, cid, rid); err != nil {
-				log.Printf("activity %s: report %d/%d: %v", logfmt.UID8(a.UID), i, count, err)
-				break // 本号上报失败：不再续发，streak 自检无意义
+				log.Printf("activity %s: отчёт %d/%d: %v", logfmt.UID8(a.UID), i, count, err)
+				break // отчёт этого номера не ушёл: дальше не шлём, самопроверка streak бессмысленна
 			}
-			log.Printf("activity %s: report %d/%d ok", logfmt.UID8(a.UID), i, count)
+			log.Printf("activity %s: отчёт %d/%d ok", logfmt.UID8(a.UID), i, count)
 			ok++
 			if i < count {
-				time.Sleep(activityReportGap) // 账号内 5 条之间间隔，避免秒发风控
+				time.Sleep(activityReportGap) // пауза между 5 отчётами номера, чтобы мгновенная отправка не триггерила антифрод
 			}
 		}
 		if ok < count {
-			continue // N 条未发满：streak 自检与领养均无意义，下个账号
+			continue // N отчётов не добрали: самопроверка streak и взятие бессмысленны, следующий номер
 		}
-		s.checkActivityStreak(a) // N 条全发满 → 回读 streak 自检（只留结论行）
-		s.travelAdoptForce(a)    // 无猫账号对话量刚补满 → 立即重试领养（豁免防抖）
+		s.checkActivityStreak(a) // все N ушли → перечитываем streak для самопроверки (в лог только итог)
+		s.travelAdoptForce(a)    // у номера без питомца объём диалогов только добрали → сразу повторяем взятие (без дебаунса)
 	}
 }
 
-// checkActivityStreak 上报成功后回读连登天数（只读 oracle，发现静默失败）。
-// 背景：REPORT-active-map.md §2 实测「上报 200 但静默丢弃」（缺 userId 时 progress 不动），
-// 上报 200 ≠ streak 计分——需要回读验证闭环。
-// 异常检测口径：days==0 → warn（report OK but streak.days=0 (silent drop?)）；
-// GET 失败 → warn 但不影响主流程（上报本身已成功，按天幂等，不做重试）。
-// 日志每号一行、一眼可 grep：`activity %s: streak days=%d`（成功也打，方便对账）。
-// 返回 true 表示「上报 OK 但 streak 可疑」（days==0 或回读失败），供测试断言。
+// checkActivityStreak после успешного отчёта перечитывает дни серии входов (только чтение oracle, ловит молчаливые потери).
+// Контекст: REPORT-active-map.md §2, замер «отчёт 200, но молча выброшен» (без userId progress не двигается),
+// отчёт 200 ≠ зачёт streak — нужна замкнутая проверка перечитыванием.
+// Порог аномалии: days==0 → warn (отчёт OK, но streak.days=0 (молчаливый сброс?));
+// GET не удался → warn, но главный поток не трогаем (сам отчёт уже успешен, идемпотентен по дню, повторов нет).
+// Лог — одна строка на номер, удобно grep'ать: `activity %s: streak дней=%d` (успех тоже пишем, для сверки).
+// Возвращает true, если «отчёт OK, но streak подозрителен» (days==0 или перечитать не вышло), для assert'ов тестов.
 func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 	days, err := s.cfg.Upstream.GrowthStreak(a)
 	if err != nil {
-		log.Printf("WARN: activity %s: streak check failed (report OK): %v", logfmt.UID8(a.UID), err)
+		log.Printf("WARN: activity %s: проверка streak не удалась (отчёт OK): %v", logfmt.UID8(a.UID), err)
 		return true
 	}
 	if days == 0 {
-		log.Printf("WARN: activity %s: report OK but streak.days=0 (silent drop?)", logfmt.UID8(a.UID))
+		log.Printf("WARN: activity %s: отчёт OK, но streak.days=0 (молчаливый сброс?)", logfmt.UID8(a.UID))
 		return true
 	}
-	log.Printf("activity %s: streak days=%d", logfmt.UID8(a.UID), days)
+	log.Printf("activity %s: streak дней=%d", logfmt.UID8(a.UID), days)
 	return false
 }
 
-// RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。
-// 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
-// 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
-// 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
+// RunKeepaliveNow немедленно обновляет token всех номеров; умершие сессии автоматически отключаем.
+// Отключение по 12153 идёт по семантике **непрерывного счёта** Pool.NoteSessionDead: одна неудача обновления номер сразу не убивает,
+// отключаем после подряд sessionDeadThreshold раз (3 раза) (P0-1: все 13 отключённых номеров были историческими ложными срабатываниями).
+// Успех обновления → ClearSessionDead обнуляет счёт (у ошибочно осуждённых номеров есть путь к возрождению).
 func (s *Scheduler) RunKeepaliveNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
@@ -447,15 +400,14 @@ func (s *Scheduler) RunKeepaliveNow() {
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
-					log.Printf("WARN: keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.UID8(st.UID), pool.SessionDeadThreshold())
+					log.Printf("WARN: keepalive %s: %d раз подряд 12153 session dead — отключение", logfmt.UID8(st.UID), pool.SessionDeadThreshold())
 				}
 			}
 			continue
 		}
-		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
-		a.BackfillRealm()                   // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
+		s.cfg.Pool.ClearSessionDead(st.UID) // успех обновления чистит счёт ложных срабатываний, неудача копиться не должна
 		if err := a.SaveAtomic(); err != nil {
-			log.Printf("keepalive %s save: %v", logfmt.UID8(st.UID), err)
+			log.Printf("keepalive %s сохранение: %v", logfmt.UID8(st.UID), err)
 		}
 	}
 }

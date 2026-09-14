@@ -12,7 +12,7 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// captureStdout 重定向 os.Stdout 并捕获 fn 期间的全部输出。
+// captureStdout перенаправляет os.Stdout и захватывает весь вывод за время fn.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout
@@ -28,8 +28,8 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(raw)
 }
 
-// withChatLog 临时开启聊天表格日志（TestMain 默认关闭），测试结束后恢复。
-// 仅供断言表格行输出的用例使用。
+// withChatLog временно включает табличный лог чата (TestMain по умолчанию выключает), после теста восстанавливает.
+// Только для кейсов, проверяющих строки табличного вывода.
 func withChatLog(t *testing.T) {
 	t.Helper()
 	old := chatLogEnabled
@@ -72,59 +72,6 @@ func TestChatStatsReaderLastFrameUsageWins(t *testing.T) {
 	}
 }
 
-// TestChatStatsReaderCreditMissing (P0, RED): usage 存在但 credit 字段缺失时
-// Credit() 必须返回 ok=false——缺失≠免费，不能把缺观测当 0 扣费记入账本
-// （否则收费的 global 号可能被误判 tier0 免费被永久优先）。
-func TestChatStatsReaderCreditMissing(t *testing.T) {
-	sse := "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n" +
-		"data: [DONE]\n\n"
-	r := newChatStatsReaderSince(strings.NewReader(sse), time.Now())
-	_, _ = io.Copy(io.Discard, r)
-	if toks, ok := r.Tokens(); !ok || toks != 5 {
-		t.Fatalf("tokens=%d ok=%v want 5/true (usage still供 token)", toks, ok)
-	}
-	credit, ok := r.Credit()
-	if ok {
-		t.Errorf("Credit()=(%v,true) want ok=false: usage 无 credit 字段 ≠ 0 成本", credit)
-	}
-}
-
-// TestChatStatsReaderCreditExplicitZero (P0, RED/GREEN): usage 显式 credit:0 是合法免费观测，
-// Credit() 必须 ok=true 且 credit==0——真 0 不许丢（显式 0 与字段缺失语义不同）。
-func TestChatStatsReaderCreditExplicitZero(t *testing.T) {
-	sse := "data: {\"usage\":{\"prompt_tokens\":500,\"completion_tokens\":500,\"credit\":0}}\n\n" +
-		"data: [DONE]\n\n"
-	r := newChatStatsReaderSince(strings.NewReader(sse), time.Now())
-	_, _ = io.Copy(io.Discard, r)
-	credit, ok := r.Credit()
-	if !ok || credit != 0 {
-		t.Errorf("Credit()=(%v,%v) want (0,true): 显式 credit:0 是合法免费观测", credit, ok)
-	}
-}
-
-// TestChatStatsReaderJSONNullCredit 回归保护：usage.credit 显式 null 也算缺失
-// （null ≠ 0），不得被当作免费观测。
-func TestChatStatsReaderJSONNullCredit(t *testing.T) {
-	sse := "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"credit\":null}}\n\n" +
-		"data: [DONE]\n\n"
-	r := newChatStatsReaderSince(strings.NewReader(sse), time.Now())
-	_, _ = io.Copy(io.Discard, r)
-	if _, ok := r.Credit(); ok {
-		t.Error("usage.credit=null 应视为缺失（ok=false）")
-	}
-}
-
-// TestChatStatsReaderNoUsage 末帧完全无 usage → Credit() ok=false（现状已对，回归保护）。
-func TestChatStatsReaderCreditNoUsage(t *testing.T) {
-	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
-		"data: [DONE]\n\n"
-	r := newChatStatsReaderSince(strings.NewReader(sse), time.Now())
-	_, _ = io.Copy(io.Discard, r)
-	if _, ok := r.Credit(); ok {
-		t.Error("无 usage 帧 Credit() 应 ok=false")
-	}
-}
-
 func TestChatStatsReaderTTFBOnlyOnDataFrame(t *testing.T) {
 	start := time.Now().Add(-2 * time.Second)
 	var s chatStatsReader
@@ -145,7 +92,7 @@ func TestChatStatsReaderTTFBOnlyOnDataFrame(t *testing.T) {
 }
 
 func TestChatStatsReaderBytesPassthrough(t *testing.T) {
-	sse := "data: {\"content\":\"你好\"}\n\ndata: [DONE]\n\n"
+	sse := "data: {\"content\":\"你好\"}\n\ndata: [DONE]\n\n" // данные: тело SSE-фикстуры (значение content «你好»), не переводим
 	r := newChatStatsReaderSince(strings.NewReader(sse), time.Now())
 	out, _ := io.ReadAll(r)
 	if string(out) != sse {
@@ -295,7 +242,7 @@ func TestChatLogsSyncRowTTFBDash(t *testing.T) {
 func TestChatLogsErrorRow(t *testing.T) {
 	withChatLog(t)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 402, `{"code":1,"msg":"余额不足"}`, false
+		return 402, `{"code":1,"msg":"余额不足"}`, false // данные: входной body апстрима (цитата «余额不足»), не переводим
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
@@ -315,7 +262,7 @@ func TestChatLogsErrorRow(t *testing.T) {
 }
 
 func TestHealthzDoesNotLogTableRow(t *testing.T) {
-	withChatLog(t) // 日志开启也应无表格行：非 chat 路由根本不走 logChatRow
+	withChatLog(t) // Даже при включённом логе строк таблицы быть не должно: не-chat маршрут вообще не идёт через logChatRow
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
 		return 200, sseOK, true

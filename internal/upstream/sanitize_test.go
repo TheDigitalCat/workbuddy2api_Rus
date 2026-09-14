@@ -15,7 +15,7 @@ const (
 	ccIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
 	ccBranch   = "Main branch (you will usually use this for PRs)"
 	ccHeader   = "x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;"
-	// Codex instructions 首段（上游逐字精确指纹，三句缺一不可）。
+	// Первый абзац Codex instructions (дословный отпечаток апстрима, все три предложения обязательны).
 	codexInstructions = "You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI. You are expected to be precise, safe, and helpful."
 )
 
@@ -29,8 +29,8 @@ func TestIdentityRewritten(t *testing.T) {
 	}
 }
 
-// 桌面版（claude-desktop-3p / Agent SDK）的身份句以逗号接后继内容，结尾不是句号。
-// 回归用例：匹配串曾带结尾句号，导致该形态漏网、指纹原样发上游 → 400 code=11128。
+// У десктопного варианта (claude-desktop-3p / Agent SDK) фраза идентичности продолжается через запятую, кончается не точкой.
+// Регрессионный кейс: матч-строка раньше несла конечную точку, из-за чего эта форма проскакивала и отпечаток уходил апстриму как есть → 400 code=11128.
 func TestIdentityDesktopVariantRewritten(t *testing.T) {
 	in := "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
 	out := sanitizeText(in)
@@ -52,8 +52,8 @@ func TestBranchRewritten(t *testing.T) {
 	}
 }
 
-// 反馈句带 Anthropic 仓库链接，上游按整句拦截（实测只留链接或只留半边均不拦）。
-// 回归用例：give→provide 一词之差即可绕过。
+// Фраза обратной связи со ссылкой на репозиторий Anthropic: апстрим режет по целому предложению (по замерам одна ссылка или половина фразы не режутся).
+// Регрессионный кейс: разницы give→provide в одно слово достаточно для обхода.
 func TestFeedbackSentenceRewritten(t *testing.T) {
 	in := "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"
 	out := sanitizeText(in)
@@ -65,8 +65,8 @@ func TestFeedbackSentenceRewritten(t *testing.T) {
 	}
 }
 
-// 上游反探测：请求体里出现裸数字 11128 即整单拦截（与上下文无关）。
-// 回归用例：该串会被改写为 11-128 以打断精确匹配。
+// Антидетект апстрима: голое число 11128 в теле запроса режет весь запрос (контекст неважен).
+// Регрессионный кейс: эта строка переписывается в 11-128, чтобы разорвать точное совпадение.
 func TestUpstreamErrorCodeRewritten(t *testing.T) {
 	in := "upstream returned code=11128 for this request"
 	out := sanitizeText(in)
@@ -78,8 +78,8 @@ func TestUpstreamErrorCodeRewritten(t *testing.T) {
 	}
 }
 
-// 回归：工具调用消息的 content 常为 null，而旧版 sanitizeMessages 在 content 缺失时
-// 直接 continue，整条消息连 tool_calls 一起被跳过 → arguments 里的被拦字符串原样漏出。
+// Регрессия: у сообщений с вызовом инструментов content часто null, а старая sanitizeMessages при отсутствующем content
+// делала прямой continue, пропуская целое сообщение вместе с tool_calls, — и запрещённая строка из arguments утекала как есть.
 func TestToolCallArgumentsSanitized(t *testing.T) {
 	msgs := []any{
 		map[string]any{"role": "user", "content": "run"},
@@ -91,12 +91,12 @@ func TestToolCallArgumentsSanitized(t *testing.T) {
 		}},
 	}
 	if !sanitizeMessages(msgs) {
-		t.Fatal("sanitizeMessages 未报告任何改动，tool_calls 被跳过")
+		t.Fatal("sanitizeMessages не доложил ни об одном изменении, tool_calls пропущены")
 	}
 	fn := msgs[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
 	got := fn["arguments"].(string)
 	if strings.Contains(got, "11128") {
-		t.Errorf("tool_call arguments 未被净化: %q", got)
+		t.Errorf("arguments tool_call не очищены: %q", got)
 	}
 }
 
@@ -107,9 +107,9 @@ func TestBillingHeaderStrippedValueIrrelevant(t *testing.T) {
 	}
 }
 
-// 附加验证：正常对话里出现 github.com/anthropics/ 链接（但不是反馈句整句）
-// 时，预检特征命中（进入净化），但改写层只动精确匹配的整句——普通链接文本
-// 不该被改写。同理，既不含 11128 也不含反馈整句的文本原样返回。
+// Дополнительная проверка: ссылка github.com/anthropics/ в обычном диалоге (но не целое предложение обратной связи)
+// даёт срабатывание предпроверки (входим в очистку), но слой переписывания трогает только точное целое предложение — обычный текст ссылки
+// трогать нельзя. Аналогично текст без 11128 и без целого предложения обратной связи возвращаем как есть.
 func TestNormalAnthropicLinkNotRewritten(t *testing.T) {
 	in := "see https://github.com/anthropics/anthropic-cookbook for examples"
 	if out := sanitizeText(in); out != in {
@@ -117,7 +117,7 @@ func TestNormalAnthropicLinkNotRewritten(t *testing.T) {
 	}
 }
 
-// Codex instructions 首段：命中预告且整句改写，逐字指纹被破坏、语义保留。
+// Первый абзац Codex instructions: предпроверка срабатывает и целое предложение переписывается, дословный отпечаток разрушен, смысл сохранён.
 func TestCodexInstructionsRewritten(t *testing.T) {
 	out := sanitizeText(codexInstructions)
 	if strings.Contains(out, codexInstructions) {
@@ -126,21 +126,21 @@ func TestCodexInstructionsRewritten(t *testing.T) {
 	if !strings.Contains(out, "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.") {
 		t.Errorf("codex first sentence not rewritten: %q", out)
 	}
-	// 其余两句原样保留，语义不变。
+	// Остальные два предложения сохраняем как есть, смысл тот же.
 	if !strings.Contains(out, "Codex CLI is an open source project led by OpenAI.") ||
 		!strings.Contains(out, "You are expected to be precise, safe, and helpful.") {
 		t.Errorf("codex remaining sentences altered: %q", out)
 	}
 }
 
-// 预检必须能认出 Codex 特征（此前只含 Claude Code，导致提前放行）。
+// Предпроверка обязана опознавать признак Codex (раньше был только Claude Code, из-за чего случался ранний пропуск).
 func TestCodexFingerprintDetected(t *testing.T) {
 	if !hasFingerprint(codexInstructions) {
 		t.Error("codex fingerprint not detected by precheck")
 	}
 }
 
-// 非精确变体不应被改写：仅去掉其中一个词即视为已破坏，无需改动。
+// Неточный вариант переписывать нельзя: достаточно убрать одно слово, чтобы считать отпечаток уже разрушенным.
 func TestCodexVariantNotTouched(t *testing.T) {
 	in := "You are a coding agent running in a CLI, a terminal-based coding assistant."
 	if out := sanitizeText(in); out != in {
@@ -205,7 +205,7 @@ func TestMultimodalTextPartOnly(t *testing.T) {
 	}
 }
 
-// 集成：完整请求体经 PrepareBodyOpt 净化后无残留指纹，且 stream/tool_choice 行为不受影响。
+// Интеграция: полное тело после очистки через PrepareBodyOpt без остаточных отпечатков, а поведение stream/tool_choice не страдает.
 func TestPrepareBodyOptSanitizesSystem(t *testing.T) {
 	body := []byte(`{"model":"glm-5.2","messages":[` +
 		`{"role":"system","content":"` + ccIdentity + ` ` + ccHeader + `"},` +
@@ -234,7 +234,7 @@ func TestPrepareBodyOptDisabledPreservesFingerprints(t *testing.T) {
 	if !strings.Contains(string(out), ccIdentity) {
 		t.Error("sanitize=false should preserve fingerprints")
 	}
-	// 但 stream 仍强制
+	// но stream всё равно принудительный
 	var obj map[string]any
 	_ = json.Unmarshal(out, &obj)
 	if obj["stream"] != true {
@@ -242,7 +242,7 @@ func TestPrepareBodyOptDisabledPreservesFingerprints(t *testing.T) {
 	}
 }
 
-// PrepareBody 默认行为 = 开启脱敏（保持向后兼容）。
+// Поведение PrepareBody по умолчанию = обезличивание включено (сохраняем обратную совместимость).
 func TestPrepareBodyDefaultSanitizes(t *testing.T) {
 	body := []byte(`{"model":"glm-5.2","messages":[{"role":"system","content":"` + ccIdentity + `"}]}`)
 	out := PrepareBodyOpt(body, true)
@@ -251,7 +251,7 @@ func TestPrepareBodyDefaultSanitizes(t *testing.T) {
 	}
 }
 
-// 出站边界集成：ChatStream 发往上游的 wire body 必须无残留指纹。
+// Интеграция исходящей границы: wire-body, уходящий апстриму через ChatStream, обязан быть без остаточных отпечатков.
 func TestChatStreamWireBodySanitized(t *testing.T) {
 	var gotBody []byte
 	ts := newTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -269,7 +269,7 @@ func TestChatStreamWireBodySanitized(t *testing.T) {
 	body := []byte(`{"model":"glm-5.2","messages":[` +
 		`{"role":"system","content":"` + ccIdentity + ` ` + ccHeader + `"},` +
 		`{"role":"user","content":"hi"}]}`)
-	rc, status, respBody, err := c.ChatStream(acct, body, "", ChatMeta{})
+	rc, status, respBody, err := c.ChatStream(acct, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestChatStreamWireBodySanitized(t *testing.T) {
 	if status >= 400 {
 		t.Fatalf("upstream status %d: %s", status, respBody)
 	}
-	// 上游收到的 body：stream 强制 + 指纹已净化
+	// Body, полученное апстримом: stream принудительный + отпечатки вычищены
 	var obj map[string]any
 	if err := json.Unmarshal(gotBody, &obj); err != nil {
 		t.Fatalf("wire body not json: %v", err)
@@ -293,8 +293,8 @@ func TestChatStreamWireBodySanitized(t *testing.T) {
 	}
 }
 
-// 出站边界（Codex 场景）：CPA 把 instructions 折成 role=system 的首条消息，
-// 净化后 wire body 不得残留 Codex 逐字指纹；其余消息不受影响。
+// Исходящая граница (сценарий Codex): CPA сворачивает instructions в первое сообщение с role=system,
+// после очистки в wire-body не должно остаться дословного отпечатка Codex; остальные сообщения не страдают.
 func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 	var gotBody []byte
 	ts := newTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +312,7 @@ func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 	body := []byte(`{"model":"kimi-k3","messages":[` +
 		`{"role":"system","content":"` + codexInstructions + `"},` +
 		`{"role":"user","content":"say ok"}]}`)
-	rc, status, respBody, err := c.ChatStream(acct, body, "", ChatMeta{})
+	rc, status, respBody, err := c.ChatStream(acct, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 	}
 }
 
-// 出站边界：关闭脱敏后 wire body 原样保留指纹（验证开关真实有效）。
+// Исходящая граница: при выключенном обезличивании wire-body сохраняет отпечатки как есть (проверяем, что выключатель реально работает).
 func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 	var gotBody []byte
 	ts := newTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -354,7 +354,7 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 	acct := &auth.Auth{AccessToken: "test-token", Domain: "copilot.tencent.com", UID: "u1"}
 
 	body := []byte(`{"model":"glm-5.2","messages":[{"role":"system","content":"` + ccIdentity + `"}]}`)
-	rc, status, _, err := c.ChatStream(acct, body, "", ChatMeta{})
+	rc, status, _, err := c.ChatStream(acct, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +367,7 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 	}
 }
 
-// newTestUpstream 起一个假上游并捕获请求。
+// newTestUpstream поднимает фейковый апстрим и перехватывает запрос.
 func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(h)

@@ -1,11 +1,11 @@
-// Package redisstore 封装 Upstash（Redis）持久化，并提供内存降级（Noop）。
+// Package redisstore инкапсулирует персистентность Upstash (Redis) и даёт деградацию в память (Noop).
 //
-// 设计约束：Upstash 走公网 TLS，单次 RTT 可能 50~300ms，因此所有写操作都是
-// fire-and-forget（后台 goroutine + 失败仅 debug 日志），读操作只发生在启动时
-// （加载粘性会话镜像、恢复冷却/熔断快照）。内存为主、Redis 为辅。
+// Ограничение дизайна: Upstash ходит по публичному TLS, один RTT может быть 50~300ms, поэтому все записи —
+// fire-and-forget (фоновая горутина + неудача только в debug-лог), чтения происходят только при старте
+// (загрузка зеркала липких сессий, восстановление снапшота охлаждений/пробоя). Память — главная, Redis — вспомогательный.
 //
-// 未配置 url / 连接失败时降级为 Noop：一切功能照常工作（纯内存模式），
-// 上层只打一条启动警告日志。
+// Без настроенного url / при неудаче соединения деградируем в Noop: вся функциональность работает как обычно (чисто режим памяти),
+// наверх уходит лишь одна стартовая предупреждающая строка лога.
 package redisstore
 
 import (
@@ -17,21 +17,21 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// keyTTL 粘性会话镜像 + 状态快照的默认 TTL（redis 侧兜底，防脏数据长期滞留）。
+// keyTTL — TTL по умолчанию для зеркала липких сессий + снапшота состояния (страховка на стороне redis от долгого залеживания грязных данных).
 const keyTTL = 7 * 24 * time.Hour
 
-// Store 只放本期需要的方法。上下文由实现内部构造（读操作配短超时，写操作 fire-and-forget）。
+// Store хранит только нужные на этом этапе методы. Контекст реализация строит внутри (чтения с коротким таймаутом, записи fire-and-forget).
 type Store interface {
-	// SetBind 异步镜像粘性会话绑定（key→uid），带 TTL。
+	// SetBind асинхронно зеркалирует привязку липкой сессии (key→uid), с TTL.
 	SetBind(key, uid string, ttl time.Duration)
-	// DelBind 异步删除粘性会话绑定。
+	// DelBind асинхронно удаляет привязку липкой сессии.
 	DelBind(key string)
-	// LoadBinds 全量读取粘性会话绑定（key→uid，key 已剥前缀）；仅在启动时调用（同步）。
-	// 供冷启动恢复粘性映射（防重启丢粘性）。
+	// LoadBinds полностью читает привязки липких сессий (key→uid, префикс у key уже снят); вызывается только при старте (синхронно).
+	// Для восстановления липкого отображения при холодном старте (чтобы рестарт не ронял липкость).
 	LoadBinds() map[string]string
-	// SaveState 异步写池状态 JSON 快照（与本地 state.json 并存，仅作恢复备份）。
+	// SaveState асинхронно пишет JSON-снапшот состояния пула (лежит рядом с локальным state.json, только как бэкап для восстановления).
 	SaveState(data []byte)
-	// LoadState 读池状态快照；仅在启动时调用（同步）。
+	// LoadState читает снапшот состояния пула; вызывается только при старте (синхронно).
 	LoadState() ([]byte, bool)
 }
 
@@ -41,20 +41,20 @@ const (
 	readTimeout = 3 * time.Second
 )
 
-// New 根据 url+token 构建 Store。
-//   - url 为空 → Noop（纯内存模式）
-//   - url 已是完整 rediss:// URL 则直接 ParseURL；否则用 token 组装 rediss://default:token@host:6379
-//   - Ping 失败 → Noop + 启动警告（硬性降级要求：不因 Redis 不可用而失败）
+// New строит Store по url+token.
+//   - пустой url → Noop (режим чистой памяти)
+//   - url уже полный rediss:// URL — парсим напрямую через ParseURL; иначе собираем из token rediss://default:token@host:6379
+//   - Ping не удался → Noop + стартовое предупреждение (жёсткое требование деградации: недоступность Redis не должна ронять процесс)
 func New(url, token string) Store {
 	if url == "" {
-		log.Printf("[redisstore] upstash 未配置，进入纯内存模式（Noop 降级）")
+		log.Printf("[redisstore] upstash не настроен, входим в режим чистой памяти (деградация в Noop)")
 		return Noop{}
 	}
 
 	full := normalizeURL(url, token)
 	opt, err := redis.ParseURL(full)
 	if err != nil {
-		log.Printf("[redisstore] 警告: redis 连接串解析失败 (%v)，降级 Noop", err)
+		log.Printf("[redisstore] предупреждение: не разобрали строку соединения redis (%v), деградируем в Noop", err)
 		return Noop{}
 	}
 	opt.ReadTimeout = readTimeout
@@ -64,19 +64,19 @@ func New(url, token string) Store {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		log.Printf("[redisstore] 警告: upstash 连接失败 (%v)，降级 Noop（纯内存模式）", err)
+		log.Printf("[redisstore] предупреждение: соединение с upstash не удалось (%v), деградируем в Noop (режим чистой памяти)", err)
 		_ = client.Close()
 		return Noop{}
 	}
-	log.Printf("[redisstore] upstash 已连接 (addr=%s)", opt.Addr)
+	log.Printf("[redisstore] upstash подключён (addr=%s)", opt.Addr)
 	return &Upstash{client: client}
 }
 
-// normalizeURL 把 url+token 归一化为可直接 ParseURL 的完整 rediss:// URL。
-// 若 url 本身已含 scheme（rediss://、redis://、https://...upstash.io 等）：
-//   - rediss:// 或 redis:// 原样返回（已是完整连接串）
-//   - 其余（如 https://xxx.upstash.io）剥掉 "://" 前缀只取 host，再按
-//     "rediss://default:<token>@<host>:6379" 组装
+// normalizeURL нормализует url+token в полный rediss:// URL, готовый к прямому ParseURL.
+// Если url уже содержит scheme (rediss://, redis://, https://...upstash.io и т.п.):
+//   - rediss:// или redis:// возвращаем как есть (уже полная строка соединения)
+//   - остальное (например https://xxx.upstash.io): отрезаем префикс до "://" и берём только host, затем собираем
+//     собираем "rediss://default:<token>@<host>:6379"
 func normalizeURL(url, token string) string {
 	if len(url) >= 8 && (url[:8] == "rediss:/" || url[:7] == "redis:/") {
 		return url
@@ -88,14 +88,14 @@ func normalizeURL(url, token string) string {
 	return "rediss://default:" + token + "@" + host + ":6379"
 }
 
-// Upstash 真实现：redis.Client 封装。
+// Upstash — настоящая реализация: обёртка над redis.Client.
 type Upstash struct {
 	client *redis.Client
 }
 
 func bindKey(key string) string { return bindPrefix + key }
 
-// SetBind 异步镜像粘性会话绑定。
+// SetBind асинхронно зеркалирует привязку липкой сессии.
 func (u *Upstash) SetBind(key, uid string, ttl time.Duration) {
 	if ttl <= 0 {
 		ttl = keyTTL
@@ -104,34 +104,34 @@ func (u *Upstash) SetBind(key, uid string, ttl time.Duration) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := u.client.Set(ctx, bindKey(key), uid, ttl).Err(); err != nil {
-			log.Printf("[redisstore] debug: SetBind %s: %v", key, err)
+			log.Printf("[redisstore] отладка: SetBind %s: %v", key, err)
 		}
 	}()
 }
 
-// DelBind 异步删除粘性会话绑定。
+// DelBind асинхронно удаляет привязку липкой сессии.
 func (u *Upstash) DelBind(key string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := u.client.Del(ctx, bindKey(key)).Err(); err != nil {
-			log.Printf("[redisstore] debug: DelBind %s: %v", key, err)
+			log.Printf("[redisstore] отладка: DelBind %s: %v", key, err)
 		}
 	}()
 }
 
-// SaveState 异步写池状态 JSON 快照。
+// SaveState асинхронно пишет JSON-снапшот состояния пула.
 func (u *Upstash) SaveState(data []byte) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := u.client.Set(ctx, stateKey, data, keyTTL).Err(); err != nil {
-			log.Printf("[redisstore] debug: SaveState: %v", err)
+			log.Printf("[redisstore] отладка: SaveState: %v", err)
 		}
 	}()
 }
 
-// LoadState 同步读池状态快照。
+// LoadState синхронно читает снапшот состояния пула.
 func (u *Upstash) LoadState() ([]byte, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel()
@@ -142,7 +142,7 @@ func (u *Upstash) LoadState() ([]byte, bool) {
 	return v, true
 }
 
-// LoadBinds 全量读取粘性会话绑定（SCAN bind:* 前缀）。
+// LoadBinds полностью читает привязки липких сессий (префикс SCAN bind:*).
 func (u *Upstash) LoadBinds() map[string]string {
 	out := map[string]string{}
 	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
@@ -159,7 +159,7 @@ func (u *Upstash) LoadBinds() map[string]string {
 	return out
 }
 
-// Noop 纯内存降级：所有方法空实现。
+// Noop — деградация в чистую память: все методы с пустой реализацией.
 type Noop struct{}
 
 func (Noop) SetBind(string, string, time.Duration) {}

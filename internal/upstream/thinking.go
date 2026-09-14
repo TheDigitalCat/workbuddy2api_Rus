@@ -1,56 +1,56 @@
-// thinking.go DeepSeek 思维链开启：出站请求体注入 thinking:{type:"enabled"} + 默认档位。
+// thinking.go — включение цепочки рассуждений DeepSeek: инжектим в исходящее тело thinking:{type:"enabled"} + ступень по умолчанию.
 //
-// 根因（issue #43，Hermes 逆向官方客户端 codebuddy.js 已确认）：
-// 官方客户端对 deepseek 系模型标记 thinkingFormat:"deepseek" + requiresReasoningContentOnAssistantMessages，
-// 发请求时「开思考」必须显式带 thinking:{type:"enabled"}，否则上游默认按不思考应答
-// （思维链不返回）。网关 payload 层此前完全不感知该字段，透传请求没有这个开关
-// → 上游不给思维链；glm/kimi 走其他 thinkingFormat（qwen 系 enable_thinking 或默认开）所以正常。
+// Корневая причина (issue #43, подтверждено реверсом официального клиента codebuddy.js от Hermes):
+// официальный клиент помечает deepseek-модели как thinkingFormat:"deepseek" + requiresReasoningContentOnAssistantMessages,
+// для «включённого мышления» в запросе обязан явно лежать thinking:{type:"enabled"}, иначе апстрим по умолчанию отвечает без мышления
+// (цепочку рассуждений не возвращает). Слой payload шлюза раньше вообще не знал этого поля, транзитные запросы шли без этого флага
+// → апстрим цепочку не отдавал; glm/kimi идут по другим thinkingFormat (ветка qwen enable_thinking либо включено по умолчанию), потому у них всё штатно.
 //
-// 打回修复（Hermes #43 验收实测）：
+// Добивочный фикс (приёмочные замеры Hermes #43):
 //
-//	thinking.type=enabled 单一字段不足——真实上游 deepseek-v4-flash 对「不带 reasoning_effort」的裸请求
-//	仍然按不思考应答（reasoning_content 长度 0），带 reasoning_effort:high 才有思维链。
-//	逆向 codebuddy.js 证实：isThinkingEnabled = !!(reasoning_summary || reasoning_effort || reasoning?.effort)，
-//	case "deepseek" 的 enabled 分支在实际出站里同时保留 reasoning_effort，官方「开思考」= thinking.type:enabled
-//	+ 某档 effort；默认档来自 reasoning.defaultEffort ?? 兜底 "high"（configure thinking 无来源时 warn fallback to 'high'）。
+//	thinking.type=enabled одного поля мало — реальный апстрим deepseek-v4-flash на голый запрос «без reasoning_effort»
+//	по-прежнему отвечает без мышления (длина reasoning_content 0), цепочка появляется только с reasoning_effort:high.
+//	Реверс codebuddy.js подтверждает: isThinkingEnabled = !!(reasoning_summary || reasoning_effort || reasoning?.effort),
+//	ветка enabled для case "deepseek" в реальном исходящем запросе сохраняет и reasoning_effort, официальное «включённое мышление» = thinking.type:enabled
+//	+ какая-то ступень effort; ступень по умолчанию берётся из reasoning.defaultEffort ?? запасное "high" (при отсутствии источника configure thinking — warn fallback to 'high').
 //
-// 行为对齐官方客户端（两路组合）：
-//   - thinking.type 已显式 enabled / disabled → 客户端显式控制，绝不覆盖；disabled 时照抄 case 行为
-//     删 reasoning_effort（snake/camel 双字段）。enabled 但缺 effort → 补默认档（官方 configure 行为）。
-//   - 无 thinking / thinking.type 空 / 已有 reasoning_effort → 注入 {type:"enabled"} + 补默认档。
-//   - 显式 reasoning_effort 一律不覆盖、不降级（降级交给 payload.go normalizeReasoningEffort）。
-//   - 非 deepseek 模型（glm/kimi/qwen 等）→ 零改动。
+// Поведение выравниваем под официальный клиент (комбинация двух путей):
+//   - thinking.type уже явно enabled / disabled → явное управление клиентом, никогда не перекрываем; при disabled копируем поведение case
+//     удаляем reasoning_effort (оба поля snake/camel). При enabled без effort → добиваем ступень по умолчанию (поведение официального configure).
+//   - нет thinking / пустой thinking.type / уже есть reasoning_effort → инжектим {type:"enabled"} + добиваем ступень по умолчанию.
+//   - явный reasoning_effort никогда не перекрываем и не понижаем (понижение отдаём normalizeReasoningEffort в payload.go).
+//   - не-deepseek модели (glm/kimi/qwen и др.) → без изменений.
 package upstream
 
 import (
 	"strings"
 )
 
-// defaultDeepSeekEffort 官方客户端默认档兜底（configure thinking 无来源时 warn fallback to 'high'，
-// REASONING_SUPPLEMENTS.defaultEffort 亦为 "high"）。补入后走 normalizeReasoningEffort 降级管线，
-// 模型不支持 high 时自动落到 ≤high 的最高支持档。
+// defaultDeepSeekEffort — запасная ступень официального клиента по умолчанию (при отсутствии источника configure thinking — warn fallback to 'high',
+// в REASONING_SUPPLEMENTS.defaultEffort тоже "high"). После подстановки идёт по конвейеру понижения normalizeReasoningEffort,
+// при неподдержке high моделью автоматически падает на высшую поддерживаемую ≤high.
 const defaultDeepSeekEffort = "high"
 
-// isDeepSeekModel 模型名以 deepseek 为前缀（不区分大小写）。
-// 覆盖 deepseek-v4.1-flash / deepseek-v4-pro / deepseek-r1 等变体；
-// 前缀匹配对齐官方 thinkingFormat:"deepseek" 的判定口径，避免漏注。
+// isDeepSeekModel — имя модели с префиксом deepseek (без учёта регистра).
+// Накрывает варианты deepseek-v4.1-flash / deepseek-v4-pro / deepseek-r1 и т.п.;
+// префиксный матч выравниваем под критерий официального thinkingFormat:"deepseek", чтобы не пропустить инжект.
 func isDeepSeekModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "deepseek")
 }
 
-// backfillReasoningContent DeepSeek 多轮一致性：历史 assistant 消息带 reasoning 痕迹时，
-// 上游要求后续请求所有 assistant 消息都带 reasoning_content 字段（string，可为空串）
-// ——即 requiresReasoningContentOnAssistantMessages（官方客户端 matches 规则）。
+// backfillReasoningContent — мультираундовая консистентность DeepSeek: если исторические сообщения assistant несут следы reasoning,
+// апстрим требует, чтобы все сообщения assistant в следующих запросах несли поле reasoning_content (string, может быть пустой)
+// — то есть requiresReasoningContentOnAssistantMessages (правило matches официального клиента).
 //
-// 规则（对齐官方客户端逻辑）：
-//   - 会话内任一 assistant 消息带非空 reasoning（string）或已有 reasoning_content 字段
-//     → 所有 assistant 消息确保有 reasoning_content（string）：
-//   - reasoning 非空且无 reasoning_content → 复制 reasoning 值
-//   - 已有 reasoning_content → 原样保留（不覆盖）
-//   - 两者皆无 → 补空串 ""
-//   - 任何 assistant 均无 reasoning 痕迹 → 零改动（不白白加字段）。
+// Правила (выравниваем под логику официального клиента):
+//   - любое сообщение assistant в сессии с непустым reasoning (string) либо уже имеющимся полем reasoning_content
+//     → все сообщения assistant обязаны иметь reasoning_content (string):
+//   - непустой reasoning без reasoning_content → копируем значение reasoning
+//   - уже есть reasoning_content → сохраняем как есть (не перекрываем)
+//   - нет ни того ни другого → добиваем пустую строку ""
+//   - ни у одного assistant нет следов reasoning → без изменений (зря поле не добавляем).
 //
-// 仅 deepseek 模型生效（thinkingFormat:deepseek + requiresReasoningContent）。
+// Действует только для deepseek-моделей (thinkingFormat:deepseek + requiresReasoningContent).
 func backfillReasoningContent(obj map[string]any) {
 	model, _ := obj["model"].(string)
 	if !isDeepSeekModel(model) {
@@ -60,7 +60,7 @@ func backfillReasoningContent(obj map[string]any) {
 	if !ok || len(msgs) == 0 {
 		return
 	}
-	// 第一遍：检测是否有任何 reasoning 痕迹（非空 reasoning 或已有 reasoning_content）。
+	// Первый проход: выясняем, есть ли хоть какие-то следы reasoning (непустой reasoning либо уже имеющееся reasoning_content).
 	hasTrace := false
 	for _, mm := range msgs {
 		msg, ok := mm.(map[string]any)
@@ -79,7 +79,7 @@ func backfillReasoningContent(obj map[string]any) {
 	if !hasTrace {
 		return
 	}
-	// 第二遍：所有 assistant 消息补/复制 reasoning_content 字段。
+	// Второй проход: всем сообщениям assistant добиваем/копируем поле reasoning_content.
 	for _, mm := range msgs {
 		msg, ok := mm.(map[string]any)
 		if !ok {
@@ -90,7 +90,7 @@ func backfillReasoningContent(obj map[string]any) {
 			continue
 		}
 		if _, ok := msg["reasoning_content"]; ok {
-			continue // 已有 → 不覆盖
+			continue // уже есть → не перекрываем
 		}
 		if r, ok := msg["reasoning"].(string); ok {
 			msg["reasoning_content"] = r
@@ -100,13 +100,13 @@ func backfillReasoningContent(obj map[string]any) {
 	}
 }
 
-// injectThinking 按 DeepSeek 思维链开关规则改写请求体。非 deepseek 零改动。
+// injectThinking переписывает тело по правилам переключателя цепочки рассуждений DeepSeek. Не-deepseek — без изменений.
 //
-// 核心逻辑（对齐官方客户端）：
-//   - 「开思考」必须 thinking.type=enabled + 有 effort 档位（Hermes #43 打回证据）。
-//   - 显式 thinking.type 非空 → 客户端显式控制：enabled 缺 effort 时补默认档；
-//     disabled 尊重并删 reasoning_effort（snake/camel 双字段）。
-//   - 无 thinking / type 空 / 已有 effort → 注入 enabled 并补默认档（已有 effort 不覆盖）。
+// Ядро логики (выравниваем под официальный клиент):
+//   - «включённое мышление» обязано иметь thinking.type=enabled + ступень effort (добивочное доказательство Hermes #43).
+//   - явный непустой thinking.type → явное управление клиентом: при enabled без effort добиваем ступень по умолчанию;
+//     disabled уважаем и удаляем reasoning_effort (оба поля snake/camel).
+//   - нет thinking / пустой type / уже есть effort → инжектим enabled и добиваем ступень по умолчанию (имеющийся effort не трогаем).
 func injectThinking(obj map[string]any) {
 	model, _ := obj["model"].(string)
 	if !isDeepSeekModel(model) {
@@ -118,19 +118,19 @@ func injectThinking(obj map[string]any) {
 		typ, _ = th["type"].(string)
 		typ = strings.TrimSpace(typ)
 	}
-	// 显式控制分支：type 非空（enabled/disabled 均为明确意图）→ 不改 type。
+	// Ветка явного управления: непустой type (и enabled, и disabled — явное намерение) → type не меняем.
 	if typ != "" {
 		if strings.EqualFold(typ, "disabled") {
 			delete(obj, "reasoning_effort")
 			delete(obj, "reasoningEffort")
-			return // disabled：关思考且不带任何 effort（照抄客户端 case 行为）
+			return // disabled: мышление выключено и никакого effort (копируем поведение case клиента)
 		}
-		ensureDeepSeekEffort(obj) // 显式 enabled 缺 effort → 补默认档
+		ensureDeepSeekEffort(obj) // явный enabled без effort → добиваем ступень по умолчанию
 		return
 	}
-	// 无 thinking（或 thinking 非法非对象值）或 thinking 对象 type 缺失/为空：
-	// 注入 enabled（客户端 case "deepseek" 行为）。有 reasoning_effort 也走此分支
-	// （effort 保留给既有降级逻辑，开关照开）。
+	// Нет thinking (или thinking — невалидное необъектное значение) либо у объекта thinking отсутствует/пуст type:
+	// инжектим enabled (поведение case "deepseek" клиента). С имеющимся reasoning_effort тоже идём сюда
+	// (effort оставляем существующей логике понижения, переключатель всё равно включаем).
 	if !ok {
 		obj["thinking"] = map[string]any{"type": "enabled"}
 	} else {
@@ -139,8 +139,8 @@ func injectThinking(obj map[string]any) {
 	ensureDeepSeekEffort(obj)
 }
 
-// ensureDeepSeekEffort 缺 effort 档位时补默认档（snake 优先，camel 兜底）。
-// 已有任一 effort → 不覆盖（显式档位不做任何改写，降级交给 normalizeReasoningEffort）。
+// ensureDeepSeekEffort добивает ступень по умолчанию при отсутствующем effort (приоритет snake, запасной camel).
+// Уже есть любой effort → не перекрываем (явную ступень никак не переписываем, понижение отдаём normalizeReasoningEffort).
 func ensureDeepSeekEffort(obj map[string]any) {
 	_, hasSnake := obj["reasoning_effort"]
 	if hasSnake {

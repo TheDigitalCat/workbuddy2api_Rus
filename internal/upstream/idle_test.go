@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// TestMonitorBodyIdleCutoff 静默超过 idle（配小值）→ Read 返回错误（context canceled）。
+// TestMonitorBodyIdleCutoff — тишина дольше idle (ставим малое) → Read возвращает ошибку (context canceled).
 func TestMonitorBodyIdleCutoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// 模拟真实 resp.Body：阻塞直到请求 context 被 cancel 才返回 error。
+	// Эмулируем реальный resp.Body: блокируемся, пока context запроса не отменят, затем возвращаем error.
 	body := monitorBody(&ctxBoundReader{ctx: ctx}, 50*time.Millisecond, cancel)
 	defer body.Close()
 	if _, err := body.Read(make([]byte, 16)); err == nil {
@@ -19,12 +19,12 @@ func TestMonitorBodyIdleCutoff(t *testing.T) {
 	}
 }
 
-// TestMonitorBodyRenewsOnActivity 持续活跃（周期吐数据，总时长 > idle）→ 流不被掐。
+// TestMonitorBodyRenewsOnActivity — постоянная активность (периодически отдаём данные, суммарно дольше idle) → поток не рвём.
 func TestMonitorBodyRenewsOnActivity(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// 每 30ms 吐 1 字节；idle=80ms。总读 10 字节耗时 300ms > idle：
-	// 若空闲续命失效（绝对 deadline 语义）早在 80ms 就被掐断。
+	// Каждые 30ms отдаём 1 байт; idle=80ms. Чтение 10 байт занимает 300ms > idle:
+	// при сломанном продлении простоя (семантика абсолютного deadline) поток оборвали бы уже на 80ms.
 	body := monitorBody(nopCloserBody{Reader: periodicReader{period: 30 * time.Millisecond}}, 80*time.Millisecond, cancel)
 	defer body.Close()
 	buf := make([]byte, 1)
@@ -35,7 +35,7 @@ func TestMonitorBodyRenewsOnActivity(t *testing.T) {
 	}
 }
 
-// TestMonitorBodyDisabledWhenIdleZero idle<=0 直接返回原底流。
+// TestMonitorBodyDisabledWhenIdleZero — при idle<=0 возвращаем исходный поток как есть.
 func TestMonitorBodyDisabledWhenIdleZero(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -50,7 +50,7 @@ func TestMonitorBodyDisabledWhenIdleZero(t *testing.T) {
 	}
 }
 
-// TestMonitorBodyCloseStopsGoroutine Close 停掉 goroutine，无泄漏（等效监控循环 + 短周期）。
+// TestMonitorBodyCloseStopsGoroutine — Close останавливает goroutine, без утечек (эквивалент цикла мониторинга + короткий период).
 func TestMonitorBodyCloseStopsGoroutine(t *testing.T) {
 	m := &idleMonitoringBody{
 		rc:       &ctxBoundReader{ctx: context.Background()},
@@ -81,7 +81,7 @@ func TestMonitorBodyCloseStopsGoroutine(t *testing.T) {
 
 // —— helpers ——
 
-// ctxBoundReader 模拟 net/http resp.Body：Read 阻塞在 ctx.Done() 上，ctx cancel 后返回错误。
+// ctxBoundReader эмулирует net/http resp.Body: Read блокируется на ctx.Done(), после отмены ctx возвращает ошибку.
 type ctxBoundReader struct{ ctx context.Context }
 
 func (r *ctxBoundReader) Read([]byte) (int, error) {

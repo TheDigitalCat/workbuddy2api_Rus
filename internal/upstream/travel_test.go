@@ -11,7 +11,7 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// travelPath 断言请求打到 growth 域的正确路径（BASE 走 chatBase，无 /v2 前缀）。
+// travelPath проверяет, что запрос бьёт в верный путь growth-домена (BASE идёт через chatBase, без префикса /v2).
 func travelPath(r *http.Request, want string) error {
 	if r.URL.Path != want {
 		return errors.New("wrong path: " + r.URL.Path)
@@ -44,8 +44,8 @@ func TestTravelStatusParsesFields(t *testing.T) {
 	}
 }
 
-// TestTravelStatusBusinessError 上游 400 且 body 仍是 {code,msg,data} 信封时，
-// 应被 doJSON 归一为 *Error（带 HTTP 状态码），而不是解析失败。
+// TestTravelStatusBusinessError — при 400 апстрима и body всё равно в конверте {code,msg,data}
+// doJSON обязан нормализовать в *Error (с HTTP-статусом), а не падать с ошибкой разбора.
 func TestTravelStatusBusinessError(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(400, `{"code":400,"msg":"no active buddy","data":null}`), nil
@@ -108,7 +108,7 @@ func TestTravelClaimReturnsReward(t *testing.T) {
 	}
 }
 
-// TestBuddyInfoNullMeansNoBuddy data.buddy 为 null → 返回 nil 表示无猫。
+// TestBuddyInfoNullMeansNoBuddy — data.buddy равен null → возвращаем nil как отсутствие кота.
 func TestBuddyInfoNullMeansNoBuddy(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodGet {
@@ -124,19 +124,20 @@ func TestBuddyInfoNullMeansNoBuddy(t *testing.T) {
 		t.Fatalf("buddy info: %v", err)
 	}
 	if b != nil {
-		t.Errorf("buddy=%+v want nil (无猫)", b)
+		t.Errorf("buddy=%+v, хотим nil (без кота)", b)
 	}
 }
 
 func TestBuddyInfoPresent(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
+		// Фикстура апстрима: имя кота на китайском (档案喵 R), не менять.
 		return jsonResp(200, `{"code":0,"data":{"buddy":{"id":7,"name":"档案喵 R"}}}`), nil
 	})
 	b, err := c.BuddyInfo(&auth.Auth{AccessToken: "at", UID: "u1"})
 	if err != nil || b == nil {
 		t.Fatalf("buddy=%+v err=%v", b, err)
 	}
-	if b.Name != "档案喵 R" || b.ID != 7 {
+	if b.Name != "档案喵 R" || b.ID != 7 { // ожидаемое значение апстрима на китайском, не менять
 		t.Errorf("buddy=%+v", b)
 	}
 }
@@ -181,7 +182,7 @@ func TestBuddyFirstPath(t *testing.T) {
 	}
 }
 
-// TestIsBuddyTaskIncomplete conversation 门槛未达标：HTTP 400 + first_buddy 关键词。
+// TestIsBuddyTaskIncomplete — не выполнен порог conversation: HTTP 400 + ключевое слово first_buddy.
 func TestIsBuddyTaskIncomplete(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(400, `{"code":400,"msg":"first_buddy task not completed yet"}`), nil
@@ -191,7 +192,7 @@ func TestIsBuddyTaskIncomplete(t *testing.T) {
 		t.Fatal("want error")
 	}
 	if !IsBuddyTaskIncomplete(err) {
-		t.Errorf("err=%v should be classified as 门槛未达标", err)
+		t.Errorf("err=%v должны классифицировать как невыполненный порог", err)
 	}
 }
 
@@ -202,10 +203,10 @@ func TestIsBuddyTaskIncompleteNegative(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"普通错误", errors.New("boom"), false},
-		{"400 其他业务错误", &Error{Kind: ErrClient, Status: 400, Msg: "no active buddy"}, false},
-		{"500 含关键词也不认", &Error{Kind: ErrServer, Status: 500, Msg: "first_buddy task not completed yet"}, false},
-		{"401 会话失效", &Error{Kind: ErrSessionDead, Status: 401, Msg: "Offline user session not found"}, false},
+		{"обычная ошибка", errors.New("boom"), false},
+		{"400 прочая бизнес-ошибка", &Error{Kind: ErrClient, Status: 400, Msg: "no active buddy"}, false},
+		{"500 с ключевым словом тоже не признаём", &Error{Kind: ErrServer, Status: 500, Msg: "first_buddy task not completed yet"}, false},
+		{"401 протухшая сессия", &Error{Kind: ErrSessionDead, Status: 401, Msg: "Offline user session not found"}, false},
 	}
 	for _, c := range cases {
 		if got := IsBuddyTaskIncomplete(c.err); got != c.want {
@@ -214,7 +215,7 @@ func TestIsBuddyTaskIncompleteNegative(t *testing.T) {
 	}
 }
 
-// TestTravel401ClassifiedSessionDead 401 交由调用方跳过本轮（巡检不强刷 token）。
+// TestTravel401ClassifiedSessionDead — 401 отдаём вызывающей стороне на пропуск хода (дозор токен принудительно не освежает).
 func TestTravel401ClassifiedSessionDead(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(401, `{"code":12153,"msg":"Offline user session not found"}`), nil

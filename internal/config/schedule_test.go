@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// TestDefaultScheduleActivityCount 缺省 ActivityReportCount=5（与 cmd/server Default() 对齐）。
-// issue #49：cmd/activity 曾因复制结构体无默认值，缺省回落到 1，与 server 的 5 漂移。
+// TestDefaultScheduleActivityCount: по умолчанию ActivityReportCount=5 (вровень с cmd/server Default()).
+// issue #49: cmd/activity когда-то копировал структуру без значений по умолчанию, пропуск откатывался к 1 и дрейфовал от 5 в server.
 func TestDefaultScheduleActivityCount(t *testing.T) {
 	s := DefaultSchedule()
 	if s.ActivityReportCount != 5 {
@@ -21,21 +21,12 @@ func TestDefaultScheduleActivityCount(t *testing.T) {
 	if len(s.ActivityHours) != 1 || s.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want [10]", s.ActivityHours)
 	}
-	if len(s.SchoolHours) != 1 || s.SchoolHours[0] != 12 {
-		t.Errorf("school_hours=%v want [12]", s.SchoolHours)
-	}
-	if len(s.CatHours) != 1 || s.CatHours[0] != 1 {
-		t.Errorf("cat_hours=%v want [1]", s.CatHours)
-	}
-	if !s.SchoolEnabled || !s.CatEnabled {
-		t.Errorf("school/cat switches must default true: %+v", s)
-	}
 }
 
-// TestNormalizeScheduleThreeStates 缺省/显式 0/显式 N 三态默认值：
-//   - 缺省（空 schedule）→ ActivityReportCount 保留 DefaultSchedule 的 5，hours 回落默认。
-//   - 显式 0  → 归一为 1（兼容旧行为）。
-//   - 显式 N  → 保留 N。
+// TestNormalizeScheduleThreeStates — три состояния пропуск/явный 0/явное N:
+//   - пропуск (пустой schedule) → ActivityReportCount сохраняет 5 из DefaultSchedule, hours откатываются к умолчанию.
+//   - явный 0 → нормализуется в 1 (совместимость со старым поведением).
+//   - явное N → сохраняется N.
 func TestNormalizeScheduleThreeStates(t *testing.T) {
 	cases := []struct {
 		name string
@@ -60,9 +51,9 @@ func TestNormalizeScheduleThreeStates(t *testing.T) {
 	}
 }
 
-// TestNormalizeScheduleEmptyHoursFallback 空数组/缺省 hours 一律回落默认。
+// TestNormalizeScheduleEmptyHoursFallback: пустые массивы/пропущенные hours всегда откатываются к умолчанию.
 func TestNormalizeScheduleEmptyHoursFallback(t *testing.T) {
-	s := Schedule{ActivityReportCount: 5} // hours 全零值（未配）
+	s := Schedule{ActivityReportCount: 5} // hours — нулевые значения (не настроены)
 	if err := s.Normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -78,15 +69,9 @@ func TestNormalizeScheduleEmptyHoursFallback(t *testing.T) {
 	if len(s.ActivityHours) != 1 || s.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want [10]", s.ActivityHours)
 	}
-	if len(s.SchoolHours) != 1 || s.SchoolHours[0] != 12 {
-		t.Errorf("school_hours=%v want [12]", s.SchoolHours)
-	}
-	if len(s.CatHours) != 1 || s.CatHours[0] != 1 {
-		t.Errorf("cat_hours=%v want [1]", s.CatHours)
-	}
 }
 
-// TestNormalizeScheduleInvalidHour 非法小时快速失败并指向正确开关。
+// TestNormalizeScheduleInvalidHour: недопустимый час — быстрый отказ с указанием правильного выключателя.
 func TestNormalizeScheduleInvalidHour(t *testing.T) {
 	cases := []struct {
 		s           Schedule
@@ -97,10 +82,6 @@ func TestNormalizeScheduleInvalidHour(t *testing.T) {
 		{Schedule{KeepaliveHours: []int{24}}, "keepalive_enabled"},
 		{Schedule{TravelHours: []int{-1}}, "travel_enabled"},
 		{Schedule{ActivityHours: []int{24}}, "activity_enabled"},
-		{Schedule{SchoolHours: []int{25}}, "school_enabled"},
-		{Schedule{SchoolHours: []int{-1}}, "school_enabled"},
-		{Schedule{CatHours: []int{24}}, "cat_enabled"},
-		{Schedule{CatHours: []int{-1}}, "cat_enabled"},
 	}
 	for _, tc := range cases {
 		err := tc.s.Normalize()

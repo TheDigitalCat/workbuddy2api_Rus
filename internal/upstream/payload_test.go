@@ -5,54 +5,54 @@ import (
 	"testing"
 )
 
-// TestNormalizeRoles 验证出站请求体把 developer 角色归一为 system。
-// 上游 role 白名单不含 developer（OpenAI 新规范的 system 别名），
-// 命中即 HTTP 400 code=11128；此处走 PrepareBodyOptWithEfforts 全链路断言。
+// TestNormalizeRoles проверяет, что исходящее тело приводит роль developer к system.
+// В белом списке role апстрима нет developer (псевдоним system из нового стандарта OpenAI),
+// попадание — сразу HTTP 400 code=11128; здесь assert'им полный тракт через PrepareBodyOptWithEfforts.
 func TestNormalizeRoles(t *testing.T) {
 	cases := []struct {
 		name      string
 		body      string
-		wantRoles []string // 与输出 messages 逐条对应的期望 role；len 即消息数
+		wantRoles []string // ожидаемые role один-в-один к выходным messages; len — число сообщений
 	}{
-		{"developer 改写为 system",
+		{"developer переписываем в system",
 			`{"messages":[{"role":"developer","content":"x"}]}`, []string{"system"}},
-		{"Developer 首字母大写改写",
+		{"Developer с заглавной переписываем",
 			`{"messages":[{"role":"Developer","content":"x"}]}`, []string{"system"}},
-		{"DEVELOPER 全大写改写",
+		{"DEVELOPER капсом переписываем",
 			`{"messages":[{"role":"DEVELOPER","content":"x"}]}`, []string{"system"}},
-		{"前后空白 TrimSpace 后改写",
+		{"окружающие пробелы переписываем после TrimSpace",
 			`{"messages":[{"role":" developer ","content":"x"}]}`, []string{"system"}},
-		{"system 原样保留",
+		{"system сохраняем как есть",
 			`{"messages":[{"role":"system","content":"x"}]}`, []string{"system"}},
-		{"user 原样保留",
+		{"user сохраняем как есть",
 			`{"messages":[{"role":"user","content":"x"}]}`, []string{"user"}},
-		{"assistant 原样保留",
+		{"assistant сохраняем как есть",
 			`{"messages":[{"role":"assistant","content":"x"}]}`, []string{"assistant"}},
-		{"tool 原样保留（不因未知而改写）",
+		{"tool сохраняем как есть (неизвестность не повод переписывать)",
 			`{"messages":[{"role":"tool","content":"x"}]}`, []string{"tool"}},
-		{"messages 缺失不 panic 且其余字段不变",
+		{"без messages без паники, остальные поля целы",
 			`{"model":"glm-5.2"}`, []string{}},
-		{"messages 为空数组不 panic",
+		{"пустой массив messages без паники",
 			`{"messages":[]}`, []string{}},
-		{"混合消息仅 developer 被改写",
+		{"в смешанных сообщениях переписываем только developer",
 			`{"messages":[{"role":"developer","content":"a"},{"role":"user","content":"b"},{"role":"developer","content":"c"}]}`,
 			[]string{"system", "user", "system"}},
-		{"sanitize=false 时仍归一（与脱敏解耦）",
+		{"при sanitize=false всё равно приводим (отвязка от обезличивания)",
 			`{"messages":[{"role":"developer","content":"x"}]}`, []string{"system"}},
-		{"非对象消息元素跳过、其余正常处理",
+		{"необъектные элементы сообщений пропускаем, остальные обрабатываем штатно",
 			`{"messages":["str",{"role":"developer","content":"x"},42]}`, []string{"system"}},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			// 全程 sanitize=false：验证 role 归一与内容脱敏开关无关（D4）。
+			// Весь проход с sanitize=false: проверяем, что приведение role не зависит от выключателя обезличивания содержимого (D4).
 			out := PrepareBodyOptWithEfforts([]byte(c.body), false, nil)
 			var obj map[string]any
 			if err := json.Unmarshal(out, &obj); err != nil {
 				t.Fatalf("unmarshal: %v (out=%s)", err, out)
 			}
 
-			// 提取输出 messages 里的 role（非对象元素跳过，不 panic）。
+			// Извлекаем role из выходных messages (необъектные элементы пропускаем, без паники).
 			var got []string
 			if msgs, ok := obj["messages"].([]any); ok {
 				for _, m := range msgs {
@@ -67,7 +67,7 @@ func TestNormalizeRoles(t *testing.T) {
 			}
 
 			if len(got) != len(c.wantRoles) {
-				t.Fatalf("role 数量不符: got %v (%d) want %v (%d)", got, len(got), c.wantRoles, len(c.wantRoles))
+				t.Fatalf("число role не совпало: получили %v (%d), хотим %v (%d)", got, len(got), c.wantRoles, len(c.wantRoles))
 			}
 			for i := range got {
 				if got[i] != c.wantRoles[i] {
@@ -77,15 +77,15 @@ func TestNormalizeRoles(t *testing.T) {
 		})
 	}
 
-	// messages 缺失时，其余字段必须原样保留（除强制 stream）。
-	t.Run("messages 缺失时其余字段不变", func(t *testing.T) {
+	// При отсутствующих messages остальные поля обязаны сохраниться как есть (кроме принудительного stream).
+	t.Run("без messages остальные поля целы", func(t *testing.T) {
 		out := PrepareBodyOptWithEfforts([]byte(`{"model":"glm-5.2","temperature":0.7}`), false, nil)
 		var obj map[string]any
 		if err := json.Unmarshal(out, &obj); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		if obj["model"] != "glm-5.2" || obj["temperature"] != 0.7 {
-			t.Errorf("其余字段被改动: %v", obj)
+			t.Errorf("остальные поля изменили: %v", obj)
 		}
 	})
 }
@@ -100,8 +100,8 @@ func TestPrepareBodyOptWithEfforts(t *testing.T) {
 		name    string
 		body    string
 		efforts map[string][]string
-		wantKey string // 输出应带有的 effort 字段名；空表示该字段应不存在
-		wantVal string // 期望值
+		wantKey string // какое effort-поле обязано быть в выводе; пусто означает, что поля быть не должно
+		wantVal string // ожидаемое значение
 	}{
 		{"downgrade to highest supported at or below request",
 			`{"model":"glm-5.2-mini","reasoning_effort":"high"}`, efforts, "reasoning_effort", "medium"},

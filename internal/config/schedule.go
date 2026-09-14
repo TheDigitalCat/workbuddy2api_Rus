@@ -1,78 +1,69 @@
-// Package config 存放跨命令共享的配置段与默认值逻辑。
+// Package config хранит общие для команд секции конфигурации и логику значений по умолчанию.
 //
-// 起因 issue #49：cmd/activity 一次性触发器曾自复制一份精简 schedule 结构体，
-// 只 json.Unmarshal 无默认值，键缺席 → Go 零值 0 → scheduler 归一为 1，
-// 与 cmd/server 主程序缺省 5 条漂移。把 Schedule 段 + 默认值/归一化抽到本包，
-// 两个命令共用同一份定义，消除漂移源头。
+// Причина — issue #49: разовый триггер cmd/activity когда-то скопировал себе урезанную структуру schedule,
+// делал только json.Unmarshal без значений по умолчанию, отсутствующий ключ → нулевое значение Go 0 → нормализация scheduler в 1,
+// а в основной программе cmd/server по умолчанию 5 записей — дрейф. Секция Schedule + значения по умолчанию/нормализация вынесены в этот пакет,
+// обе команды используют одно определение, источник дрейфа устранён.
 package config
 
 import "fmt"
 
-// Schedule 排程配置段（对应 config.json 的 "schedule" 对象）。
+// Schedule — секция расписания (объект "schedule" в config.json).
 //
-// 六类独立排程：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子。
-// cmd/server 与 cmd/activity 共用本结构，默认值由 DefaultSchedule 填充、
-// 缺省归一由 Normalize 完成——两命令走同一份语义，不再各自复制。
+// Четыре независимых расписания: чекин / отчёт об активности / путешествие кота / keepalive токена.
+// cmd/server и cmd/activity используют одну структуру, значения по умолчанию задаёт DefaultSchedule,
+// нормализацию пропусков делает Normalize — обе команды идут по одной семантике, копий больше нет.
 type Schedule struct {
 	CheckinHours   []int `json:"checkin_hours"`   // [9,21]
 	TravelHours    []int `json:"travel_hours"`    // [9,21]
 	ActivityHours  []int `json:"activity_hours"`  // [10]
 	KeepaliveHours []int `json:"keepalive_hours"` // [22]
-	SchoolHours    []int `json:"school_hours"`    // [12] 开学季任务（迁移自 school/cat 两条系统 crontab）
-	CatHours       []int `json:"cat_hours"`       // [1] 夜猫窗口 23-08 CST，01:00 窗口内补 1 次
-	// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/SchoolEnabled/CatEnabled
-	// 显式禁用开关（缺省 true）。
+	// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled — явные выключатели (по умолчанию true).
 	//
-	// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
-	//   - 空数组与 null 在老语义里已被"未配置 → 回落默认"占用，改判会静默翻转
-	//     所有老 config 的行为（用户只想删掉一行，结果关掉了签到）；bool 缺省 true
-	//     则对老配置零影响，向后完全兼容。
-	//   - 开关与取值解耦：禁用时仍保留用户显式配的小时，重新启用无需补配。
-	//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
-	CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到
-	TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停猫猫旅行
-	ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
-	KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
-	SchoolEnabled    bool `json:"school_enabled"`    // 缺省 true；false = 停开学季任务
-	CatEnabled       bool `json:"cat_enabled"`       // 缺省 true；false = 停夜猫子任务
-	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
-	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
+	// Почему отдельный bool, а не пустой массив/сентинел со смыслом "выключено":
+	//   - пустой массив и null в старой семантике уже заняты под "не настроено → откат к умолчанию", смена трактовки молча перевернёт
+	//     поведение всех старых config (пользователь удалил одну строку — и случайно выключил чекин); bool по умолчанию true
+	//     никак не влияет на старые конфигурации, полная обратная совместимость.
+	//   - выключатель отделён от значений: при выключении явно заданные часы сохраняются, повторное включение не требует дописывать конфиг.
+	//   - не нужно угадывать сентинелы (вроде [-1]), недопустимые часы всегда ошибка с подсказкой использовать этот выключатель.
+	CheckinEnabled   bool `json:"checkin_enabled"`   // по умолчанию true; false = выключить чекин
+	TravelEnabled    bool `json:"travel_enabled"`    // по умолчанию true; false = полностью остановить путешествие кота
+	ActivityEnabled  bool `json:"activity_enabled"`  // по умолчанию true; false = остановить отчёты об активности
+	KeepaliveEnabled bool `json:"keepalive_enabled"` // по умолчанию true; false = выключить keepalive токена
+	// ActivityReportCount — число отчётов об активности на номер за раз: чтобы забрать кота, нужно 5 диалогов,
+	// по умолчанию 5 записей закрывают chat_5; 0/пропуск=1 для совместимости со старым поведением.
 	ActivityReportCount int `json:"activity_report_count"`
-	// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
-	// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
+	// Путешествие кота сняло с учёта travel_interval_minutes: теперь у путешествия отдельное расписание (travel_hours).
+	// Старый ключ в config из-за неизвестных JSON-полей просто игнорируется, без ошибки.
 }
 
-// DefaultSchedule 返回排程段的默认值。
+// DefaultSchedule возвращает значения секции расписания по умолчанию.
 //
-// 开关「缺省 true」靠这里实现：调用方先取 DefaultSchedule 再用 json.Unmarshal 覆盖，
-// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
-// ActivityReportCount 默认 5：领猫前置需 5 次对话，5 连发刷满 chat_5。
+// Выключатели «по умолчанию true» реализованы здесь: вызывающий код сначала берёт DefaultSchedule, потом накрывает json.Unmarshal,
+// отсутствующий ключ (или null) оставляет поле как было — true, только явный false выключает.
+// ActivityReportCount по умолчанию 5: чтобы забрать кота, нужно 5 диалогов, 5 записей подряд закрывают chat_5.
 func DefaultSchedule() Schedule {
 	return Schedule{
 		CheckinHours:        []int{9, 21},
 		TravelHours:         []int{9, 21},
 		ActivityHours:       []int{10},
 		KeepaliveHours:       []int{22},
-		SchoolHours:          []int{12},
-		CatHours:             []int{1},
 		CheckinEnabled:      true,
 		TravelEnabled:       true,
 		ActivityEnabled:     true,
 		KeepaliveEnabled:    true,
-		SchoolEnabled:       true,
-		CatEnabled:          true,
-		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		ActivityReportCount: 5, // чтобы забрать кота, нужно 5 диалогов, 5 записей подряд закрывают chat_5
 	}
 }
 
-// Normalize 归一化排程段：空数组/null 回落默认小时，ActivityReportCount 归一，校验小时范围。
+// Normalize нормализует секцию расписания: пустые массивы/null откатываются к часам по умолчанию, ActivityReportCount нормализуется, диапазон часов проверяется.
 //
-// 空数组与 null 反序列化后覆盖掉 DefaultSchedule 的排程值（键缺席才保留），在此补齐。
-// 空 = 未配置 → 回落默认；「禁用」一律走 *_enabled=false，两者互不混淆。
+// Пустой массив и null при десериализации затирают значения расписания из DefaultSchedule (отсутствие ключа — сохраняет), здесь добиваем.
+// Пусто = не настроено → откат к умолчанию; «выключить» — только через *_enabled=false, одно с другим не смешивается.
 //
-// ActivityReportCount：0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
-// 注意这是「显式配 0 = 旧行为」的兼容语义，与 scheduler.New 的 <=0 → 1 归一一致；
-// 「缺省 = 5」由 DefaultSchedule 在 Unmarshal 前置入，是另一条路径，两者不合并。
+// ActivityReportCount: 0/отрицательное → 1 запись (совместимость со старым поведением: один отчёт на номер в день зажигал серию входов).
+// Обратите внимание: это семантика совместимости «явный 0 = старое поведение», совпадающая с нормализацией scheduler.New <=0 → 1;
+// «по умолчанию = 5» подставляет DefaultSchedule до Unmarshal — другой путь, их не объединяем.
 func (s *Schedule) Normalize() error {
 	if len(s.CheckinHours) == 0 {
 		s.CheckinHours = []int{9, 21}
@@ -86,24 +77,18 @@ func (s *Schedule) Normalize() error {
 	if len(s.KeepaliveHours) == 0 {
 		s.KeepaliveHours = []int{22}
 	}
-	if len(s.SchoolHours) == 0 {
-		s.SchoolHours = []int{12}
-	}
-	if len(s.CatHours) == 0 {
-		s.CatHours = []int{1}
-	}
-	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
+	// 0/отрицательное → 1 запись (совместимость со старым поведением: один отчёт на номер в день зажигал серию входов).
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
 	}
 	return s.validateHours()
 }
 
-// validateHours 校验排程小时落在 0-23。
+// validateHours проверяет, что часы расписания в диапазоне 0-23.
 //
-// 为什么不用 `[-1]` 之类的哨兵值表意"禁用"：非法小时被静默吞掉时，用户以为关掉了签到，
-// 实际可能被当成另一个整点照常执行；这里直接快速失败，并在错误信息里指向正确的开关
-// （checkin_enabled / keepalive_enabled），避免用户靠猜哨兵值来配。
+// Почему не сентинелы вроде `[-1]` со смыслом "выключено": недопустимый час при молчаливом проглатывании заставит пользователя думать, что чекин выключен,
+// а на деле он может выполняться как обычно в другой час; здесь быстрый отказ с указанием правильного выключателя в тексте ошибки
+// (checkin_enabled / keepalive_enabled), чтобы не гадать с сентинелами.
 func (s *Schedule) validateHours() error {
 	if err := checkHourRange("schedule.checkin_hours", "checkin_enabled", s.CheckinHours); err != nil {
 		return err
@@ -114,19 +99,13 @@ func (s *Schedule) validateHours() error {
 	if err := checkHourRange("schedule.activity_hours", "activity_enabled", s.ActivityHours); err != nil {
 		return err
 	}
-	if err := checkHourRange("schedule.keepalive_hours", "keepalive_enabled", s.KeepaliveHours); err != nil {
-		return err
-	}
-	if err := checkHourRange("schedule.school_hours", "school_enabled", s.SchoolHours); err != nil {
-		return err
-	}
-	return checkHourRange("schedule.cat_hours", "cat_enabled", s.CatHours)
+	return checkHourRange("schedule.keepalive_hours", "keepalive_enabled", s.KeepaliveHours)
 }
 
 func checkHourRange(field, switchKey string, hours []int) error {
 	for _, h := range hours {
 		if h < 0 || h > 23 {
-			return fmt.Errorf("%s: %d 不是合法小时（0-23）；如要关闭该任务请设 schedule.%s=false", field, h, switchKey)
+			return fmt.Errorf("%s: %d — недопустимый час (0-23); чтобы выключить задачу, задайте schedule.%s=false", field, h, switchKey)
 		}
 	}
 	return nil

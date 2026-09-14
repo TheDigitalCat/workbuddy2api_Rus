@@ -21,29 +21,20 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// TestMain 默认关闭聊天表格日志（chatLogEnabled=false），消除 go test 期间的 stdout 噪音。
-// 断言表格行输出的测试（logging_test.go 中的 ChatLogs/LogChatRow 系列）用 withChatLog 临时开启。
+// TestMain по умолчанию гасит табличный лог чата (chatLogEnabled=false), убирая шум stdout во время go test.
+// Тесты, проверяющие строки таблицы (серия ChatLogs/LogChatRow в logging_test.go), временно включают через withChatLog.
 func TestMain(m *testing.M) {
 	chatLogEnabled = false
 	os.Exit(m.Run())
 }
 
-// resetModelsCache 清空 package 级动态模型缓存（测试隔离：fetchDynamicModels 是全包共享
-// 状态，不复位会导致 /v1/models 断言被先前测试的缓存污染——shuffle 下偶发失败）。
-func resetModelsCache() {
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-}
-
+// данные: тело SSE-фикстуры (значение content «你好»), не переводим
 const sseOK = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n" +
 	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n" +
 	"data: [DONE]\n\n"
 
-// newFakeUpstream 返回一个 ChatStream 走 fake 的 upstream.Client。
-// fake 依据 Authorization 头决定行为。
+// newFakeUpstream возвращает upstream.Client, у которого ChatStream идёт через fake.
+// fake решает поведение по заголовку Authorization.
 func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body string, isStream bool)) *upstream.Client {
 	t.Helper()
 	return &upstream.Client{
@@ -69,7 +60,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// bindStore 记录粘性绑定镜像调用（不联网），供 D4 端到端断言绑定收敛到最终成功号。
+// bindStore пишет зеркальные вызовы липких привязок (без сети), для сквозного assert'а D4, что привязка сходится к финально успешному номеру.
 type bindStore struct {
 	redisstore.Noop
 	mu     sync.Mutex
@@ -106,10 +97,10 @@ func (b *bindStore) lastUID(key string) (string, bool) {
 	return u, ok
 }
 
-// testPoolWith 构建一个所有账号 credits=1000 的池，并注入确定性随机源：
-// randInt64N 恒返回 0 → pickWeighted 必选候选集中积分最高者（第一个）。
-// 这让依赖"bad 先被选中"的轮转测试（如 TestChatRotatesOnHardCredit）完全确定，
-// 不再受加权随机影响而 flake。
+// testPoolWith собирает пул, где у всех номеров credits=1000, и inject'ит детерминированный источник случайности:
+// randInt64N всегда возвращает 0 — pickWeighted обязан выбрать кандидата с max-кредитом (первого).
+// Это делает ротационные тесты, зависящие от «bad выбран первым» (например TestChatRotatesOnHardCredit), полностью детерминированными,
+// взвешенная случайность больше не даёт flake.
 func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 	p := pool.New("")
 	p.SetRandomSource(func(n int64) int64 { return 0 })
@@ -120,26 +111,7 @@ func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 	return p
 }
 
-// assertJSONErrorCode 断言响应体是 OpenAI 风格 error 信封且 code 精确等于 want。
-func assertJSONErrorCode(t *testing.T, body, want string) bool {
-	t.Helper()
-	var envelope struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
-		t.Fatalf("not openai error json: %v body=%s", err, body)
-		return false
-	}
-	if envelope.Error.Code != want {
-		t.Errorf("error code=%q want %q body=%s", envelope.Error.Code, want, body)
-		return false
-	}
-	return true
-}
-
-// TestChatBodyLimitExactAllowed 恰好等于上限的请求体正常放行到上游（不被 413 误伤）。
+// TestChatBodyLimitExactAllowed: тело ровно на лимите нормально пропускаем вверх (413 ложно не бьёт).
 func TestChatBodyLimitExactAllowed(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -150,7 +122,7 @@ func TestChatBodyLimitExactAllowed(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 100})
 	const prefix = `{"model":"glm-5.2","messages":[],"pad":"`
 	const suffix = `"}`
-	pad := strings.Repeat("a", 100-len(prefix)-len(suffix)) // 恰好 100 字节
+	pad := strings.Repeat("a", 100-len(prefix)-len(suffix)) // ровно 100 байт
 	if body := prefix + pad + suffix; len(body) != 100 {
 		t.Fatalf("fixture len=%d want 100", len(body))
 	}
@@ -164,8 +136,8 @@ func TestChatBodyLimitExactAllowed(t *testing.T) {
 	}
 }
 
-// TestChatOversizedBodyReturns413 请求体超过上限 → 直接 413 request_body_too_large：
-// 不打上游（calls=0）、不罚账号（无冷却/无熔断计数/无禁用）、不轮转。
+// TestChatOversizedBodyReturns413: тело сверх лимита — сразу 413 request_body_too_large:
+// вверх не бьём (calls=0), номер не наказываем (без охлаждения/счётчика пробоя/отключения), не ротируем.
 func TestChatOversizedBodyReturns413(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -176,7 +148,7 @@ func TestChatOversizedBodyReturns413(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 100})
 	const prefix = `{"model":"glm-5.2","messages":[],"pad":"`
 	const suffix = `"}`
-	// 101 字节 > 100 上限。
+	// 101 байт > лимита 100.
 	pad := strings.Repeat("a", 100-len(prefix)-len(suffix)+1)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(prefix+pad+suffix)))
@@ -199,8 +171,8 @@ func TestChatOversizedBodyReturns413(t *testing.T) {
 	}
 }
 
-// TestChatOversizedBodyDefaultLimitHeader 未显式设置 MaxBodyBytes 时兜底 8MB：
-// 8MB+1 的请求体必须 413（不再静默截断喂给上游，issue #41 根因）。
+// TestChatOversizedBodyDefaultLimitHeader: без явного MaxBodyBytes страхуем 8MB:
+// тело 8MB+1 обязано дать 413 (больше не режем молча перед апстримом, первопричина issue #41).
 func TestChatOversizedBodyDefaultLimit(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -208,7 +180,7 @@ func TestChatOversizedBodyDefaultLimit(t *testing.T) {
 		return 200, sseOK, true
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up}) // 不注入 MaxBodyBytes → 默认 8MB
+	h := NewHandler(Config{Pool: p, Upstream: up}) // MaxBodyBytes не inject'им — дефолт 8MB
 
 	body := make([]byte, 8<<20+1) // 8MB+1
 	copy(body, `{"model":"glm-5.2","messages":[]}`)
@@ -222,9 +194,9 @@ func TestChatOversizedBodyDefaultLimit(t *testing.T) {
 	}
 }
 
-// TestChatBadParamsRotatesWithoutPenalty 上游 400 + Unmarshal chat params failed（11101）
-// → 该类归 ErrBadParams：不罚账号（无冷却/无禁用/无熔断计数/无 errTotal），但**仍然轮转**
-// （换号重试可能命中不同权限的账号）。端到端断言 bad 失败、good 成功、账号完好。
+// TestChatBadParamsRotatesWithoutPenalty: апстрим 400 + Unmarshal chat params failed (11101)
+// — этот класс идёт как ErrBadParams: номер не наказываем (без охлаждения/отключения/счётчика пробоя/errTotal), но **всё равно ротируем**
+// (повтор со сменой номера может попасть на номер с другими правами на модели). Сквозно assert'им: bad провалился, good успешен, номера целы.
 func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -238,7 +210,7 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	p.SetCredits("bad", 2000) // 确定性源 r=0 → 先选 bad
+	p.SetCredits("bad", 2000) // детерминированный источник r=0 — первым выбираем bad
 	p.SetCredits("good", 1000)
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
@@ -247,18 +219,18 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 		t.Fatalf("code=%d body=%s (want 200 after rotate to good)", rec.Code, rec.Body)
 	}
 	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
-		t.Errorf("calls=%v want bad/good 各 1 次", calls)
+		t.Errorf("calls=%v want bad/good по 1 разу", calls)
 	}
-	// 账号完好：无冷却、无禁用、无熔断计数、无 errTotal。
+	// Номера целы: без охлаждения, без отключения, без счётчика пробоя, без errTotal.
 	st, _ := p.Status("bad")
 	if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 {
 		t.Errorf("ErrBadParams must not penalize account: %+v", st)
 	}
 }
 
-// TestChatAllBadParams503CarriesUpstreamBody 全部账号都 11101 时 503 文案必须包含
-// 上游原始 11101 信息（不再是空洞的 no_healthy_account）。
-// 现状即透传 lastErr.Error()（含上游 body），本测试把它锁定为回归。
+// TestChatAllBadParams503CarriesUpstreamBody: когда все номера — 11101, текст 503 обязан содержать
+// исходную информацию апстрима 11101 (а не пустой no_healthy_account).
+// Статус-кво — прозрачно пробрасываем lastErr.Error() (включая body апстрима), этот тест фиксирует как регрессию.
 func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, false
@@ -301,6 +273,7 @@ func TestChatNonStreamAggregates(t *testing.T) {
 		t.Errorf("object=%v", resp["object"])
 	}
 	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	// данные: ожидаемое значение content «你好» (тело SSE-фикстуры), не переводим
 	if msg["content"] != "你好" {
 		t.Errorf("content=%q", msg["content"])
 	}
@@ -324,6 +297,7 @@ func TestChatStreamPassthrough(t *testing.T) {
 		t.Errorf("ct=%q", ct)
 	}
 	body := rec.Body.String()
+	// данные: ищем значение content «你好» и каркас SSE data: [DONE] (протокол/SSE не меняем), не переводим
 	if !strings.Contains(body, "你好") || !strings.Contains(body, "data: [DONE]") {
 		t.Errorf("body=%q", body)
 	}
@@ -334,7 +308,7 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls[authz]++
 		if authz == "Bearer at-bad" {
-			return 402, `{"code":1,"msg":"余额不足"}`, false
+			return 402, `{"code":1,"msg":"余额不足"}`, false // данные: входной body апстрима (цитата «余额不足»), не переводим
 		}
 		return 200, sseOK, true
 	})
@@ -342,7 +316,7 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// 让 bad 积分更高被先选中
+	// bad с большим кредитом выбираем первым
 	p.SetCredits("bad", 2000)
 	p.SetCredits("good", 1000)
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
@@ -361,10 +335,10 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	}
 }
 
-// TestChatSoftCoolsOnRateLimitBody 端到端回归 issue #28：上游用非 429 状态码
-// （400 + 限流文案）表达模型侧限流时，该账号必须进入 CoolSoft 冷却，而不是只换号。
-// 修复前 Classify 归 ErrClient → applyErrorPolicy 走 default 分支只换号不罚，
-// 账号留在可用池里，下一个请求仍会被选中。
+// TestChatSoftCoolsOnRateLimitBody: сквозная регрессия issue #28 — апстрим выражает модельный лимит не-429 статусом
+// (400 + текст лимита): этот номер обязан уйти в охлаждение CoolSoft, а не просто смениться.
+// До фикса Classify клал в ErrClient — applyErrorPolicy шёл в default-ветку «только смена без наказания»,
+// номер оставался в доступном пуле и следующий запрос снова его выбирал.
 func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -378,7 +352,7 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// 让 bad 积分更高被先选中（与 TestChatRotatesOnHardCredit 同一确定性手法）。
+	// bad с большим кредитом выбираем первым (тот же детерминированный приём, что в TestChatRotatesOnHardCredit).
 	p.SetCredits("bad", 2000)
 	p.SetCredits("good", 1000)
 	const soft = 45 * time.Second
@@ -390,18 +364,18 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
-		t.Errorf("calls=%v want bad/good 各 1 次", calls)
+		t.Errorf("calls=%v want bad/good по 1 разу", calls)
 	}
 	st, _ := p.Status("bad")
 	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad 应进入 soft_rate 冷却: %+v", st)
+		t.Fatalf("bad должен уйти в охлаждение soft_rate: %+v", st)
 	}
-	// 冷却时长取自注入的 SoftCooldown，不依赖真实等待。
+	// Длительность охлаждения берём из inject'нутого SoftCooldown, реального ожидания нет.
 	if max := int64(soft / time.Second); st.CoolRemaining <= 0 || st.CoolRemaining > max {
 		t.Errorf("cool_remaining_sec=%d want in (0,%d]", st.CoolRemaining, max)
 	}
 
-	// 冷却生效：同一账号在冷却期内不得再被选中。
+	// Охлаждение действует: тот же номер в период охлаждения выбирать нельзя.
 	before := calls["Bearer at-bad"]
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
@@ -409,168 +383,15 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 		t.Fatalf("second code=%d body=%s", rec2.Code, rec2.Body)
 	}
 	if calls["Bearer at-bad"] != before {
-		t.Errorf("冷却中的账号不应再次被选中: calls=%v", calls)
+		t.Errorf("охлаждаемый номер не должны выбирать снова: calls=%v", calls)
 	}
 }
 
-// TestChatAccountFault11140Disables 账号级授权封禁（11140 request illegal，实测为
-// global 账号 auth_forbidden 风控）：软冷却到期也不会自动恢复（需重新 OAuth 登录），
-// 到期后重新选号只会再撞 403 浪费轮换——故**硬禁用**（不在池中参与选号），同一请求
-// 轮换到下一个号、后续请求直接跳过。
-// 修复前 Classify 对 403+request illegal 归 ErrClient → applyErrorPolicy 走 default
-// 只换号不罚，坏号留在可用池反复被选中刷风控；软冷却列后来只是临时止血，到期复发。
-func TestChatAccountFault11140Disables(t *testing.T) {
-	calls := map[string]int{}
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		calls[authz]++
-		if authz == "Bearer at-bad" {
-			return 403, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, false
-		}
-		return 200, sseOK, true
-	})
-	p := testPoolWith(
-		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
-		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
-	)
-	// 让 bad 积分更高被先选中（与 TestChatRotatesOnHardCredit 同一确定性手法）。
-	p.SetCredits("bad", 2000)
-	p.SetCredits("good", 1000)
-	const cool = 90 * time.Second
-	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: cool})
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
-	}
-	// 坏号只打一次即被禁用并轮换到 good：无无限重试。
-	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
-		t.Errorf("calls=%v want bad/good 各 1 次", calls)
-	}
-	st, _ := p.Status("bad")
-	if !st.Disabled {
-		t.Fatalf("bad 应被硬禁用（11140 封禁需重登，不可自愈）: %+v", st)
-	}
-	wantReason := "account banned by upstream (11140 request illegal), re-login required"
-	if st.DisabledReason != wantReason {
-		t.Errorf("disabled_reason=%q want %q", st.DisabledReason, wantReason)
-	}
-	if st.Cooling {
-		t.Errorf("硬禁用由 disabled 表达，不应叠加冷却状态: %+v", st)
-	}
-
-	// 禁用生效：后续请求（冷却早过期）也不再选中 bad（不再刷上游风控）。
-	before := calls["Bearer at-bad"]
-	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec2.Code != 200 {
-		t.Fatalf("second code=%d body=%s", rec2.Code, rec2.Body)
-	}
-	if calls["Bearer at-bad"] != before {
-		t.Errorf("禁用的账号不应被选中: calls=%v", calls)
-	}
-}
-
-// TestChatAccountFault14017Rotates 配额未激活（14017 trial not activated，实测 global
-// 新账号 register 未完成）同样纳入轮换：坏号冷却、轮换到下一号、不再被重复选中。
-// 与 11140（硬禁用）区分的关键：14017 属于 register 未完成，完善 register 后可能
-// 自动恢复——所以**保持软冷却**，不禁用（禁用会让用户补完 register 后仍无法用）。
-func TestChatAccountFault14017Rotates(t *testing.T) {
-	calls := map[string]int{}
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		calls[authz]++
-		if authz == "Bearer at-bad" {
-			return 429, `{"error":{"data":{"code":14017,"msg":"The trial version is not yet activated. Please log out of your current account and log in again to activate it immediately and start your free trial."}}}`, false
-		}
-		return 200, sseOK, true
-	})
-	p := testPoolWith(
-		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
-		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
-	)
-	p.SetCredits("bad", 2000)
-	p.SetCredits("good", 1000)
-	const cool = 45 * time.Second
-	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: cool})
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
-	}
-	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
-		t.Errorf("calls=%v want bad/good 各 1 次", calls)
-	}
-
-	// 14017 保持软冷却（软 45s），不得硬禁用——register 完善后自动恢复（区别于 11140）。
-	st, _ := p.Status("bad")
-	if st.Disabled {
-		t.Fatalf("bad 不应被禁用（14017 trial 未激活可能自愈）: %+v", st)
-	}
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Errorf("bad 应进入 soft_rate 冷却（14017 软冷却，非禁用）: %+v", st)
-	}
-
-	// 冷却生效：同一账号在冷却期内不得再被选中。
-	before := calls["Bearer at-bad"]
-	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec2.Code != 200 {
-		t.Fatalf("second code=%d body=%s", rec2.Code, rec2.Body)
-	}
-	if calls["Bearer at-bad"] != before {
-		t.Errorf("冷却中的账号不应再次被选中: calls=%v", calls)
-	}
-}
-
-// TestApplyErrorPolicyAccountFaultSplit applyErrorPolicy 层直接回归：同一 ErrAccountFault
-// 分类下按 msg 分野——"request illegal"(11140) → 硬禁用；"trial"(14017) → 软冷却不禁用。
-// 端到端接线由上方 TestChatAccountFault11140Disables / TestChatAccountFault14017Rotates 覆盖。
-func TestApplyErrorPolicyAccountFaultSplit(t *testing.T) {
-	const why11140 = "account banned by upstream (11140 request illegal), re-login required"
-
-	t.Run("11140 request illegal disables", func(t *testing.T) {
-		p := pool.New("")
-		p.Add(&auth.Auth{UID: "u1"})
-		h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
-
-		h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, "glm-5.2")
-		st, _ := p.Status("u1")
-		if !st.Disabled {
-			t.Fatalf("11140 应硬禁用: %+v", st)
-		}
-		if st.DisabledReason != why11140 {
-			t.Errorf("disabled_reason=%q want %q", st.DisabledReason, why11140)
-		}
-		if st.Cooling {
-			t.Errorf("11140 禁用不应叠加冷却: %+v", st)
-		}
-	})
-
-	t.Run("14017 trial stays soft cool", func(t *testing.T) {
-		p := pool.New("")
-		p.Add(&auth.Auth{UID: "u1"})
-		h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
-
-		h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"error":{"data":{"code":14017,"msg":"The trial version is not yet activated"}}}`, "glm-5.2")
-		st, _ := p.Status("u1")
-		if st.Disabled {
-			t.Fatalf("14017 不应禁用: %+v", st)
-		}
-		if !st.Cooling || st.CoolKind != "soft_rate" {
-			t.Errorf("14017 应 soft_rate 软冷却: %+v", st)
-		}
-		if st.Reason == "" {
-			t.Errorf("14017 冷却 reason 不应为空: %+v", st)
-		}
-	})
-}
-
-// TestApplyErrorPolicySoftRateExponentialBackoff handler 层回归：同一账号连续被限流，
-// 冷却时长必须 600s → 1200s → 2400s 指数增长（时长断言全部取自注入值，不依赖真实等待）。
-// 直接驱动 applyErrorPolicy 而非发 HTTP 请求：账号在冷却期内不会被再次选中，
-// 走完整请求会需要等冷却自然到期（真实 sleep），而这里要验的正是"连续限流"的退避本身。
-// Classify→applyErrorPolicy 的接线由 TestChatSoftCoolsOnRateLimitBody 端到端覆盖。
+// TestApplyErrorPolicySoftRateExponentialBackoff: регрессия уровня handler — один номер подряд под лимитом,
+// длительность охлаждения обязана расти экспоненциально 600s → 1200s → 2400s (длительности assert'им только из inject'нутых значений, реального ожидания нет).
+// Напрямую крутим applyErrorPolicy, а не шлём HTTP-запрос: номер в охлаждении не будет выбран снова,
+// полный запрос ждал бы естественного истечения охлаждения (реальный sleep), а здесь проверяем именно бэкофф «подряд под лимитом».
+// Связку Classify→applyErrorPolicy сквозно покрывает TestChatSoftCoolsOnRateLimitBody.
 func TestApplyErrorPolicySoftRateExponentialBackoff(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -580,7 +401,7 @@ func TestApplyErrorPolicySoftRateExponentialBackoff(t *testing.T) {
 		h.applyErrorPolicy("u1", upstream.ErrSoftRate, "", "")
 		st, _ := p.Status("u1")
 		if !st.Cooling || st.CoolKind != "soft_rate" {
-			t.Fatalf("call %d: 应为 soft_rate 冷却: %+v", i+1, st)
+			t.Fatalf("call %d: должно быть охлаждение soft_rate: %+v", i+1, st)
 		}
 		if st.SoftStreak != i+1 {
 			t.Errorf("call %d: soft_streak=%d want %d", i+1, st.SoftStreak, i+1)
@@ -591,36 +412,36 @@ func TestApplyErrorPolicySoftRateExponentialBackoff(t *testing.T) {
 	}
 }
 
-// TestApplyErrorPolicyNotFoundUsesFixedBase 404 分流：偶发上游 404 的冷却基数固定 60s
-// （notFoundCooldown），不取 soft_rate 的 600s 基数，也不受其配置值影响。
+// TestApplyErrorPolicyNotFoundUsesFixedBase: развилка 404 — база охлаждения спорадического апстрим-404 фиксирована 60s
+// (notFoundCooldown), базу soft_rate 600s не берём, его конфиг не влияет.
 //
-// 关于退避：404 仍走 Cooldown(CoolSoft)，因此与 429 共用同一 softStreak（本用例锚定这一
-// 现状）。这不构成"偶发 404 罚过重"的场景——streak 只在**连续**无成功时累积，
-// 中间任何一次成功（NoteSuccess）都会把它清零；故只有持续 404 的坏号才会退避升级。
+// Про бэкофф: 404 всё равно идёт через Cooldown(CoolSoft), поэтому делит с 429 один softStreak (этот кейс якорит
+// статус-кво). Сценария «спорадический 404 наказан чрезмерно» здесь нет — streak копится только при **подряд** без успеха,
+// любой успех посередине (NoteSuccess) обнуляет его; эскалируют бэкофф лишь стабильно-404 плохие номера.
 func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	h := NewHandler(Config{Pool: p, SoftCooldown: 20 * time.Minute}) // soft_rate 配得很大，验证 404 不受其影响
+	h := NewHandler(Config{Pool: p, SoftCooldown: 20 * time.Minute}) // soft_rate ставим огромным, проверяем, что 404 от него не зависит
 
 	notFoundSec := int64(notFoundCooldown / time.Second)
 	for i, want := range []int64{notFoundSec, 2 * notFoundSec, 4 * notFoundSec} {
 		h.applyErrorPolicy("u1", upstream.ErrNotFound, "", "")
 		st, _ := p.Status("u1")
 		if !st.Cooling || st.CoolKind != "soft_rate" {
-			t.Fatalf("call %d: 应为 soft 冷却: %+v", i+1, st)
+			t.Fatalf("call %d: должно быть soft-охлаждение: %+v", i+1, st)
 		}
 		if st.SoftStreak != i+1 {
 			t.Errorf("call %d: soft_streak=%d want %d", i+1, st.SoftStreak, i+1)
 		}
-		// 基数取自 notFoundCooldown（60s）而非注入的 soft_rate（20m）。
+		// Базу берём из notFoundCooldown (60s), а не из inject'нутого soft_rate (20m).
 		if st.CoolRemaining < want-3 || st.CoolRemaining > want {
-			t.Errorf("call %d: 404 cool_remaining_sec=%d want ~%d（固定基数 %ds，非 soft_rate）",
+			t.Errorf("call %d: 404 cool_remaining_sec=%d want ~%d (фиксированная база %ds, не soft_rate)",
 				i+1, st.CoolRemaining, want, notFoundSec)
 		}
 	}
 
-	// 成功后 streak 归零 → 下次 404 回到 60s 基数。
-	// （签到解冻 ReenableIfCredits 不适用于本场景：它保留 streak，是冷却域的续期。）
+	// После успеха streak в нуле — следующий 404 снова на базе 60s.
+	// (Разморозка подписанием ReenableIfCredits сюда не применима: она сохраняет streak, это продление домена охлаждения.)
 	p.NoteSuccess("u1")
 	h.applyErrorPolicy("u1", upstream.ErrNotFound, "", "")
 	if st, _ := p.Status("u1"); st.SoftStreak != 1 || st.CoolRemaining > notFoundSec {
@@ -628,7 +449,7 @@ func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 	}
 }
 
-// TestNewHandlerSoftCooldownDefault 端到端：未注入 SoftCooldown 时基数回落到 600s（原为 60s）。
+// TestNewHandlerSoftCooldownDefault сквозно: без inject'нутого SoftCooldown база откатывается к 600s (было 60s).
 func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz == "Bearer at-bad" {
@@ -642,7 +463,7 @@ func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 	)
 	p.SetCredits("bad", 2000)
 	p.SetCredits("good", 1000)
-	h := NewHandler(Config{Pool: p, Upstream: up}) // 不注入 SoftCooldown
+	h := NewHandler(Config{Pool: p, Upstream: up}) // SoftCooldown не inject'им
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
@@ -651,14 +472,14 @@ func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 	}
 	st, _ := p.Status("bad")
 	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad 应进入 soft_rate 冷却: %+v", st)
+		t.Fatalf("bad должен уйти в охлаждение soft_rate: %+v", st)
 	}
 	if st.CoolRemaining <= 599 || st.CoolRemaining > 600 {
 		t.Errorf("default soft cooldown cool_remaining_sec=%d want 600", st.CoolRemaining)
 	}
 }
 
-// TestChatStickyFollowsFinalSuccess 端到端验证 D4：粘性号失败换号成功后，会话绑定收敛到成功号。
+// TestChatStickyFollowsFinalSuccess: сквозно проверяем D4 — липкий номер провалился, смена номера успешна, привязка сессии сходится к успешному.
 func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 	st := newBindStore()
 	sess := session.New(session.Config{
@@ -670,7 +491,7 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// 先把会话预绑定到 bad（模拟历史粘性），bad 失败、good 成功 → 绑定应切到 good。
+	// Сначала preprint'им сессию к bad (имитируем историческую липкость), bad провалился, good успешен — привязка должна уйти на good.
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz == "Bearer at-bad" {
 			return 500, `{"code":500}`, false
@@ -683,7 +504,7 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 		Session:      sess,
 		SoftCooldown: time.Minute,
 	})
-	// 预绑定：sess.Bind("conv-1", "bad")，然后请求体带同 conversation_id。
+	// Предпривязка: sess.Bind("conv-1", "bad"), затем тело запроса несёт тот же conversation_id.
 	sess.Bind("conv-1", "bad")
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
 	rec := httptest.NewRecorder()
@@ -691,13 +512,13 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	// 绑定必须收敛到最终成功的 good。
+	// Привязка обязана сойтись к финально успешному good.
 	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
 		t.Fatalf("sticky binding should follow final success to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
 	}
 }
 
-// TestChatStickySuccessKeepsBinding 粘性号直接成功 → 绑定不变（仍为该号）。
+// TestChatStickySuccessKeepsBinding: липкий номер сразу успешен — привязка не меняется (остаётся на нём).
 func TestChatStickySuccessKeepsBinding(t *testing.T) {
 	st := newBindStore()
 	sess := session.New(session.Config{
@@ -722,8 +543,8 @@ func TestChatStickySuccessKeepsBinding(t *testing.T) {
 	}
 }
 
-// TestChatStickyFullFallsBackToRotation 端到端验证 C3 语义：粘性号满载不可用时，
-// 请求在同一轮内解绑并回落普通轮换选中健康账号，绑定收敛到最终成功号——而非空耗一轮。
+// TestChatStickyFullFallsBackToRotation: сквозно проверяем семантику C3 — когда липкий номер недоступен по заполненности,
+// запрос в том же круге отвязывается и откатывается к обычной ротации за здоровым номером, привязка сходится к финально успешному — а не жжёт круг вхолостую.
 func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	st := newBindStore()
 	sess := session.New(session.Config{
@@ -735,7 +556,7 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// bad 占满唯一在途名额：PickByUID 将返回 nil（healthy 但 inFlight 满）→ 解绑 + 回落轮换。
+	// bad занимает единственный in-flight слот: PickByUID вернёт nil (healthy, но inFlight полон) — отвязка + откат к ротации.
 	p.SetMaxInFlight(1)
 	p.Acquire("bad")
 
@@ -755,7 +576,7 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	// 满载粘性号被解绑，绑定收敛到最终成功号 good。
+	// Заполненный липкий номер отвязан, привязка сошлась к финально успешному good.
 	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
 		t.Fatalf("sticky binding should fall back to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
 	}
@@ -765,7 +586,7 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz == "Bearer at-bad" {
-			return 402, `{"code":1,"msg":"余额不足"}`, false
+			return 402, `{"code":1,"msg":"余额不足"}`, false // данные: входной body апстрима (цитата «余额不足»), не переводим
 		}
 		return 200, sseOK, true
 	})
@@ -773,7 +594,7 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	p.SetCredits("bad", 2000) // bad 积分高，确定性源 → 先被选中
+	p.SetCredits("bad", 2000) // у bad кредит выше, детерминированный источник — выбираем первым
 	p.SetCredits("good", 1000)
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
@@ -786,36 +607,36 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	if !ok || !st.Cooling {
 		t.Fatalf("bad should be cooling: %+v ok=%v", st, ok)
 	}
-	if st.Reason != "余额不足" {
+	if st.Reason != "余额不足" { // данные: причина-цитата апстрима, не переводим
 		t.Errorf("reason=%q", st.Reason)
 	}
-	// 硬信贷冷却必须是次日 04:00，而不是固定 12h/配置时长。
+	// Жёсткое кредитное охлаждение обязано быть до 04:00 следующего дня, а не фиксированные 12h/длина из конфига.
 	if st.Until.Hour() != 4 {
 		t.Errorf("until hour=%d want 4 (next-day 04:00)", st.Until.Hour())
 	}
-	// 距次日 04:00 最长 28h（凌晨 00:00~04:00 间运行时 now→次日 04:00 跨度 > 24h，属正常）。
+	// До 04:00 следующего дня максимум 28h (при запуске между 00:00~04:00 ночи отрезок now→04:00 следующего дня длиннее 24h — это нормально).
 	if d := time.Until(st.Until); d <= 0 || d > 28*time.Hour {
 		t.Errorf("until %v not within (0,28h]: %v", st.Until, d)
 	}
-	// 立即换号成功：good 被选中。
+	// Сразу успешны со сменой номера: выбран good.
 	stGood, _ := p.Status("good")
 	if stGood.Cooling || stGood.Disabled {
 		t.Errorf("good should stay healthy: %+v", stGood)
 	}
 }
 
-// TestChat6004ModelResetCoolsToParsedTime 端到端回归 issue #31：上游 429 + code 6004
-// +「将在 … 重置」→ 冷却 until 精确等于解析时间（而非 600s 固定基数/指数退避），
-// 且记录触发模型 → 同模型请求仍被冷却、切模型请求按豁免可选。
+// TestChat6004ModelResetCoolsToParsedTime: сквозная регрессия issue #31 — апстрим 429 + code 6004
+// + цитата «将在 … 重置» (данные апстрима, не переводим) — охлаждение until ровно равно распарсенному времени (а не фиксированной базе 600s/экспоненциальному бэкоффу),
+// и пишем триггерную модель — запросы той же модели всё ещё охлаждаются, запросы со сменой модели идут по освобождению.
 func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
-	// 用未来 5 分钟的重置时间（wall-clock）构造上游响应。
+	// Время сброса берём на 5 минут в будущем (wall-clock) и строим ответ апстрима.
 	reset := time.Now().Add(5 * time.Minute)
 	ts := reset.In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
 		if authz == "Bearer at-bad" {
-			return 429, `{"code":6004,"msg":"将在 ` + ts + ` UTC+8 重置"}`, false
+			return 429, `{"code":6004,"msg":"将在 ` + ts + ` UTC+8 重置"}`, false // данные: входной body апстрима (цитата «将在 … 重置»), не переводим
 		}
 		return 200, sseOK, true
 	})
@@ -825,7 +646,7 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	)
 	p.SetCredits("bad", 2000)
 	p.SetCredits("good", 1000)
-	// 隔离对 breaker 的干扰：熔断阈值默认 3，一次失败不触发。
+	// Изолируем от помех breaker'у: порог пробоя по умолчанию 3, один провал не триггерит.
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.3","messages":[]}`))
@@ -834,21 +655,17 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s (want 200 after rotate to good)", rec.Code, rec.Body)
 	}
-	// bad 已进入 6004 模型级冷却：模型级台账含 glm-5.3 + 该模型独立截止 ≈ reset。
+	// bad уже в soft-охлаждении, until ≈ reset.
 	st, _ := p.Status("bad")
-	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
-		t.Fatalf("bad should have glm-5.3 model limit ledger: %+v", st)
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Fatalf("bad should be soft cooling from 6004: %+v", st)
 	}
-	if d := st.RateLimitedModels[0].Until.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("model until=%v want ~reset=%v (diff %v)", st.RateLimitedModels[0].Until, reset, d)
+	if d := st.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("until=%v want ~reset=%v (diff %v)", st.Until, reset, d)
 	}
-	// 6004 不写账号级 until（模型级独立冷却）。
-	if !st.Until.IsZero() {
-		t.Errorf("Status.Until=%v 应为零值（6004 不写账号级 until）", st.Until)
-	}
-	// 记录触发模型（bad 池内 private 字段需经 Status 不可见，改用行为断言）：
-	// 同模型 glm-5.3 的请求不应选中 bad（仍冷却）；
-	// 不同模型 hy3-x 的请求应豁免冷却选中 bad（最高分）。
+	// Пишем триггерную модель (приватное поле bad в пуле через Status не видно, assert'им поведением):
+	// запрос той же модели glm-5.3 не должен выбрать bad (всё ещё охлаждается);
+	// запрос другой модели hy3-x должен по освобождению выбрать bad (топ-кредит).
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	same := p.PickExcludingForModel(nil, "glm-5.3")
 	if same == nil || same.UID != "good" {
@@ -860,8 +677,8 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
-// TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
-// （现状不变）。
+// TestChat6004WithoutResetFallsBackToBackoff: 6004 без текста времени — откатываемся к мягкому охлаждению на базе 600s
+// (статус-кво не меняем).
 func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -888,7 +705,7 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 	if !st.Cooling || st.CoolKind != "soft_rate" {
 		t.Fatalf("bad should be soft cooling: %+v", st)
 	}
-	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
+	// Длительность охлаждения = inject'нутая soft-база (60s), не распарсенное время (текста сброса нет).
 	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
 		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
 	}
@@ -896,7 +713,7 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 
 func TestChatAllUnavailableReturns503(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 402, `{"code":1,"msg":"余额不足"}`, false
+		return 402, `{"code":1,"msg":"余额不足"}`, false // данные: входной body апстрима (цитата «余额不足»), не переводим
 	})
 	h := NewHandler(Config{
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
@@ -942,7 +759,7 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 		ChatBaseCN:    "https://fake.example",
 		BillingBaseCN: "https://fake.example",
 	}
-	// 传输错误不喂熔断计数：一次 transport error 不应累计 errTotal 也不应熔断。
+	// Транспортная ошибка не кормит счётчик пробоя: один transport error не должен копить errTotal и не должен пробивать.
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
@@ -957,7 +774,7 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 
 func TestChatHTTP5xxPenalizes(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	// 熔断阈值 1：一次 5xx 即触发熔断（连续失败语义并入熔断器）。
+	// Порог пробоя 1: один 5xx сразу триггерит пробой (семантика подряд-провалов сложена в пробойник).
 	p.SetBreaker(1, time.Hour, time.Hour)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 500, `{"code":500}`, false
@@ -992,7 +809,6 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	resetModelsCache()
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -1011,24 +827,24 @@ func TestModelsEndpoint(t *testing.T) {
 	}
 	found := false
 	for _, m := range data {
-		if m.(map[string]any)["id"] == "cn:glm-5.2" {
+		if m.(map[string]any)["id"] == "glm-5.2" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("cn:glm-5.2 missing (static models prefixed)")
+		t.Error("glm-5.2 missing")
 	}
 }
 
 func TestModelsDynamic(t *testing.T) {
-	// 清缓存
+	// Чистим кэш
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.ids = nil
 	dynamicModelsCache.fetched = time.Time{}
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
 
-	// 假上游返回动态模型（含 agents + maxInputTokens/maxOutputTokens）
+	// Фейковый апстрим возвращает динамические модели (включая agents + maxInputTokens/maxOutputTokens)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, `{"code":0,"data":{"models":[{"id":"dyn-model-a","maxInputTokens":65536,"maxOutputTokens":8192},{"id":"dyn-model-b","maxInputTokens":131072,"maxOutputTokens":16384},{"id":"glm-9.9","maxInputTokens":262144,"maxOutputTokens":32768}],"agents":[{"name":"cli","models":["dyn-model-a","dyn-model-b","glm-9.9"]}]}}`, false
 	})
@@ -1049,32 +865,32 @@ func TestModelsDynamic(t *testing.T) {
 	for _, m := range data {
 		ids[m.(map[string]any)["id"].(string)] = true
 	}
-	if !ids["cn:dyn-model-a"] || !ids["cn:glm-9.9"] {
-		t.Errorf("dynamic ids (cn-prefixed) missing: %v", ids)
+	if !ids["dyn-model-a"] || !ids["glm-9.9"] {
+		t.Errorf("dynamic ids missing: %v", ids)
 	}
 
-	// 断言字段映射：maxInputTokens → context_length，maxOutputTokens → max_output_tokens
+	// Assert'им маппинг полей: maxInputTokens → context_length, maxOutputTokens → max_output_tokens
 	for _, m := range data {
 		mm := m.(map[string]any)
 		switch mm["id"] {
-		case "cn:dyn-model-a":
+		case "dyn-model-a":
 			if mm["context_length"].(float64) != 65536 {
-				t.Errorf("cn:dyn-model-a context_length=%v want 65536", mm["context_length"])
+				t.Errorf("dyn-model-a context_length=%v want 65536", mm["context_length"])
 			}
 			if mm["max_output_tokens"].(float64) != 8192 {
-				t.Errorf("cn:dyn-model-a max_output_tokens=%v want 8192", mm["max_output_tokens"])
+				t.Errorf("dyn-model-a max_output_tokens=%v want 8192", mm["max_output_tokens"])
 			}
-		case "cn:glm-9.9":
+		case "glm-9.9":
 			if mm["context_length"].(float64) != 262144 {
-				t.Errorf("cn:glm-9.9 context_length=%v want 262144", mm["context_length"])
+				t.Errorf("glm-9.9 context_length=%v want 262144", mm["context_length"])
 			}
 			if mm["max_output_tokens"].(float64) != 32768 {
-				t.Errorf("cn:glm-9.9 max_output_tokens=%v want 32768", mm["max_output_tokens"])
+				t.Errorf("glm-9.9 max_output_tokens=%v want 32768", mm["max_output_tokens"])
 			}
 		}
 	}
 
-	// 第二次调用走缓存（把上游关掉也成功）
+	// Второй вызов идёт через кэш (успешен, даже если апстрим выключить)
 	dynamicModelsCache.RLock()
 	cached := len(dynamicModelsCache.ids)
 	dynamicModelsCache.RUnlock()
@@ -1084,14 +900,14 @@ func TestModelsDynamic(t *testing.T) {
 }
 
 func TestModelsDynamicFallsBackToStatic(t *testing.T) {
-	// 清缓存
+	// Чистим кэш
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.ids = nil
 	dynamicModelsCache.fetched = time.Time{}
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
 
-	// 假上游 500
+	// Фейковый апстрим 500
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 500, `boom`, false
 	})
@@ -1105,14 +921,14 @@ func TestModelsDynamicFallsBackToStatic(t *testing.T) {
 	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	data := resp["data"].([]any)
-	// 回退静态表（≥5 个）
+	// Откатываемся к статической таблице (≥5 шт.)
 	if len(data) < 5 {
 		t.Errorf("static fallback failed: %d", len(data))
 	}
 }
 
 func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
-	// 清缓存
+	// Чистим кэш
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.ids = nil
 	dynamicModelsCache.fetched = time.Time{}
@@ -1120,7 +936,7 @@ func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
 	dynamicModelsCache.Unlock()
 
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	p.SetBreaker(1, time.Hour, time.Hour) // 熔断阈值 1：一次 fetch 失败即熔断
+	p.SetBreaker(1, time.Hour, time.Hour) // порог пробоя 1: один провал fetch сразу пробивает
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 500, `boom`, false
 	})
@@ -1137,7 +953,7 @@ func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
 }
 
 func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
-	// 清缓存
+	// Чистим кэш
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.ids = nil
 	dynamicModelsCache.fetched = time.Time{}
@@ -1152,8 +968,8 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
 
-	// 连续 3 次请求，上游持续 500 → 只应触发 1 次 fetch（负缓存生效），
-	// 其余走静态 fallback（仍返回 200）。
+	// 3 запроса подряд, апстрим стабильно 500 — должен случиться лишь 1 fetch (работает негативный кэш),
+	// остальное идёт статическим fallback'ом (всё равно 200).
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
@@ -1165,7 +981,7 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 		t.Errorf("want 1 fetch, got %d", calls)
 	}
 
-	// 冷却期结束（把失败时间戳拨回 10 分钟前）→ 应重新 fetch。
+	// Период охлаждения вышел (откручиваем метку провала на 10 минут назад) — должны снова fetch'ить.
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.lastFail = time.Now().Add(-10 * time.Minute)
 	dynamicModelsCache.Unlock()
@@ -1179,114 +995,20 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	}
 }
 
-// TestModelsDynamicZeroContextFallback 动态模型缺 maxInputTokens → context_length 兜底 131072，
-// 其余真实值不得被覆盖（issue 提醒：不能全表统一 131072 抹平真实 ContextLength）。
-func TestModelsDynamicZeroContextFallback(t *testing.T) {
-	resetModelsCache()
-
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 200, `{"code":0,"data":{"models":[
-			{"id":"dyn-zero-ctx","maxInputTokens":0,"maxOutputTokens":4096},
-			{"id":"dyn-real-ctx","maxInputTokens":262144,"maxOutputTokens":32768}
-		],"agents":[{"name":"cli","models":["dyn-zero-ctx","dyn-real-ctx"]}]}}`, false
-	})
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d", rec.Code)
-	}
-	var resp struct {
-		Data []map[string]any `json:"data"`
-	}
-	if err := jsonUnmarshal(rec.Body.String(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	zero := map[string]any{}
-	real := map[string]any{}
-	for _, m := range resp.Data {
-		switch m["id"] {
-		case "cn:dyn-zero-ctx":
-			zero = m
-		case "cn:dyn-real-ctx":
-			real = m
-		}
-	}
-	// 缺 maxInputTokens → 兜底 131072（其余字段保持真实）。
-	if zc, _ := zero["context_length"].(float64); zc != 131072 {
-		t.Errorf("zero-ctx context_length=%v want 131072 fallback", zc)
-	}
-	if zo, _ := zero["max_output_tokens"].(float64); zo != 4096 {
-		t.Errorf("zero-ctx max_output_tokens=%v want 4096 (real value preserved)", zo)
-	}
-	// 有真实 maxInputTokens → 必须用真实值，不得被兜底抹平。
-	if rc, _ := real["context_length"].(float64); rc != 262144 {
-		t.Errorf("real-ctx context_length=%v want 262144 (real value must win)", rc)
-	}
-	if ro, _ := real["max_output_tokens"].(float64); ro != 32768 {
-		t.Errorf("real-ctx max_output_tokens=%v want 32768", ro)
-	}
-}
-
-// TestModelsDynamicUnderscoresStaticAndPreservesBodies 动态成功时优先动态结果（连 headers
-// 字段一并保留原样），失败才回退静态表——两条路径都产出 valid models 响应。
-func TestModelsDynamicUnderscoresStaticAndPreservesBodies(t *testing.T) {
-	resetModelsCache()
-
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 200, `{"code":0,"data":{"models":[
-			{"id":"dyn-only","maxInputTokens":200000,"maxOutputTokens":20000,"name":"Dyn Only"}
-		],"agents":[{"name":"cli","models":["dyn-only"]}]}}`, false
-	})
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
-
-	var resp struct {
-		Data []map[string]any `json:"data"`
-	}
-	if err := jsonUnmarshal(rec.Body.String(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(resp.Data) == 0 {
-		t.Fatal("no models returned")
-	}
-	// 动态优先：动态模型出现即证明未走静态 fallback。
-	found := false
-	for _, m := range resp.Data {
-		if m["id"] == "cn:dyn-only" {
-			found = true
-			if cl, _ := m["context_length"].(float64); cl != 200000 {
-				t.Errorf("cn:dyn-only context_length=%v want 200000 (dynamic value)", cl)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("/v1/models must include cn:dyn-only when dynamic fetch succeeds: %v", resp.Data)
-	}
-
-	// 失败路径仍 return 静态表（既有行为由 TestModelsDynamicFallsBackToStatic 覆盖）。
-	if len(resp.Data) == 0 {
-		t.Fatal("static fallback produced empty list")
-	}
-}
-
 func TestAPIKeyAuth(t *testing.T) {
 	h := NewHandler(Config{
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
 		Upstream: upstream.New(),
 		APIKey:   "secret",
 	})
-	// 无 key
+	// Без key
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 401 {
 		t.Errorf("no key: code=%d", rec.Code)
 	}
-	// 错 key
+	// Неверный key
 	req = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer wrong")
 	rec = httptest.NewRecorder()
@@ -1294,7 +1016,7 @@ func TestAPIKeyAuth(t *testing.T) {
 	if rec.Code != 401 {
 		t.Errorf("wrong key: code=%d", rec.Code)
 	}
-	// 对 key（请求会继续打到上游，但此处上游 client 会失败 —— 只要不是 401 就行）
+	// Верный key (запрос дальше бьёт вверх, но тамошний client апстрима провалится — лишь бы не 401)
 	req = httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec = httptest.NewRecorder()
@@ -1321,7 +1043,7 @@ func TestStatusEndpoint(t *testing.T) {
 	if strings.Contains(body, "AccessToken") || strings.Contains(body, `"at"`) {
 		t.Error("token leaked in status output")
 	}
-	// Phase 3 汇总字段。
+	// Phase 3: сводные поля.
 	var statusBody map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &statusBody); err != nil {
 		t.Fatalf("status not json: %v", err)
@@ -1331,7 +1053,7 @@ func TestStatusEndpoint(t *testing.T) {
 		statusBody["in_flight_full"] != float64(0) {
 		t.Errorf("summary=%v want total=1 healthy=1 cooling=0 disabled=0 in_flight_full=0", statusBody)
 	}
-	// Phase v3：池级 sticky_sessions + redis_mode。
+	// Phase v3: пуловые sticky_sessions + redis_mode.
 	if statusBody["sticky_sessions"] != float64(0) {
 		t.Errorf("sticky_sessions=%v want 0", statusBody["sticky_sessions"])
 	}
@@ -1340,7 +1062,7 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 }
 
-// TestStatusInFlightFull /status 透出满载计数：healthy 且占满在途的账号数。
+// TestStatusInFlightFull: /status отдаёт счётчик заполненности — число номеров healthy и забитых in-flight.
 func TestStatusInFlightFull(t *testing.T) {
 	p := testPoolWith(
 		&auth.Auth{UID: "full", AccessToken: "at", ExpiresAt: 9999999999},
@@ -1369,11 +1091,11 @@ func TestStatusInFlightFull(t *testing.T) {
 }
 
 func TestStatusPortraitFields(t *testing.T) {
-	// Phase 3：/status 单账号需返回健康画像字段。
+	// Phase 3: /status по одному номеру обязан вернуть поля портрета здоровья.
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
 	p.NoteSuccess("u1")
 	p.NoteSuccess("u1")
-	p.NoteError("u1") // 记录 last_err + err_total（累计，不冷却）
+	p.NoteError("u1") // пишем last_err + err_total (копим, без охлаждения)
 	p.Cooldown("u1", pool.CoolSoft, time.Hour, "429 rate limit")
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
 	rec := httptest.NewRecorder()
@@ -1408,80 +1130,7 @@ func TestStatusPortraitFields(t *testing.T) {
 	}
 }
 
-// TestStatusRateLimitedModelsLedger end-to-end（issue #36）：上游 429 6004 带
-// 「将在 … 重置」→ 账号 modelCooldowns 被写入 → /status accounts 输出该模型的
-// 限额台账（rate_limited_models[].model + reset_at + until）。
-func TestStatusRateLimitedModelsLedger(t *testing.T) {
-	reset := time.Now().Add(35 * time.Minute)
-	ts := reset.In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
-	body := `{"code":6004,"msg":"将在 ` + ts + ` UTC+8 重置"}`
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 429, body, false
-	})
-	p := testPoolWith(
-		&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999},
-		&auth.Auth{UID: "u2", AccessToken: "at", ExpiresAt: 9999999999},
-	)
-	const soft = 600 * time.Second
-	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: soft})
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	// 双号都被 6004 → 全部换完仍 503（无健康号），但换号过程已把 u1 冷却。
-	if rec.Code != 503 {
-		t.Fatalf("code=%d want 503 body=%s", rec.Code, rec.Body)
-	}
-	// u1 被选中过（已冷却 + 有台账）。
-	st, ok := p.Status("u1")
-	if !ok {
-		t.Fatal("u1 missing")
-	}
-	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.2" {
-		t.Fatalf("u1 应进入 6004 模型级软冷却（glm-5.2 台账）: %+v", st)
-	}
-
-	statusRec := httptest.NewRecorder()
-	h.ServeHTTP(statusRec, httptest.NewRequest("GET", "/status", nil))
-	if statusRec.Code != 200 {
-		t.Fatalf("status code=%d body=%s", statusRec.Code, statusRec.Body)
-	}
-	var sbody struct {
-		Accounts []pool.Status `json:"accounts"`
-	}
-	if err := json.Unmarshal(statusRec.Body.Bytes(), &sbody); err != nil {
-		t.Fatalf("status not json: %v", err)
-	}
-	var su1 *pool.Status
-	for i := range sbody.Accounts {
-		if sbody.Accounts[i].UID == "u1" {
-			su1 = &sbody.Accounts[i]
-			break
-		}
-	}
-	if su1 == nil {
-		t.Fatal("u1 不在 /status accounts 里")
-	}
-	if len(su1.RateLimitedModels) != 1 {
-		t.Fatalf("u1 rate_limited_models=%v want 1 行", su1.RateLimitedModels)
-	}
-	row := su1.RateLimitedModels[0]
-	if row.Model != "glm-5.2" {
-		t.Errorf("model=%q want glm-5.2", row.Model)
-	}
-	if d := row.ResetAt.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("reset_at=%v want ~35m 后=%v", row.ResetAt, reset)
-	}
-	// 6004 模型级冷却不写账号级 until：Status.Until 应为零值，模型截止在台账行里。
-	if !su1.Until.IsZero() {
-		t.Errorf("Status.Until=%v 应为零值（6004 不写账号级 until）", su1.Until)
-	}
-	if d := row.Until.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("until=%v want ~35m 后=%v", row.Until, reset)
-	}
-	// 未命中测试账号（u2 也被限流）也会带台账——但只断言 u1（被选中的号）即验证端到端。
-}
-
-// TestHealthzEmptyPool 空池（healthy=0）→ 503，表示暂不可服务。
+// TestHealthzEmptyPool: пустой пул (healthy=0) — 503, временно не обслуживаем.
 func TestHealthzEmptyPool(t *testing.T) {
 	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
 	rec := httptest.NewRecorder()
@@ -1498,7 +1147,7 @@ func TestHealthzEmptyPool(t *testing.T) {
 	}
 }
 
-// TestHealthz503WhenNoHealthy 所有账号禁用/冷却 → 503。
+// TestHealthz503WhenNoHealthy: все номера отключены/охлаждены — 503.
 func TestHealthz503WhenNoHealthy(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
 	p.Disable("u1", "session dead")
@@ -1521,12 +1170,12 @@ func TestHealthz503WhenNoHealthy(t *testing.T) {
 	}
 }
 
-// TestHealthz503WhenAllInFlightFull 全部账号 healthy 但都占满在途 → 503（与 chat 同口径），
-// 且 healthy 语义未变（仍为 1）：满载不是状态机健康维度的变化，是探活口径单独叠加。
+// TestHealthz503WhenAllInFlightFull: все номера healthy, но все забиты in-flight — 503 (тот же калибр, что у chat),
+// и семантика healthy не менялась (всё ещё 1): заполненность — не смена измерения здоровья автомата, а отдельно наложенный калибр пробы.
 func TestHealthz503WhenAllInFlightFull(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
 	p.SetMaxInFlight(1)
-	p.Acquire("u1") // 占满唯一在途名额
+	p.Acquire("u1") // занимаем единственный in-flight слот
 	defer p.Release("u1")
 
 	if p.ServableNow() {
@@ -1542,28 +1191,13 @@ func TestHealthz503WhenAllInFlightFull(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
 	}
-	// healthy 语义未变：账号仍是 healthy（只占满在途，非冷却/禁用）。
+	// Семантика healthy не менялась: номер всё ещё healthy (только забит in-flight, не охлаждён/отключён).
 	if resp["healthy"] != float64(1) || resp["total"] != float64(1) {
 		t.Errorf("healthz json=%v want healthy=1 total=1 (healthy semantics unchanged)", resp)
 	}
 }
 
-// TestHealthz200WhenAllModelExempt 全部账号处于 6004 单模型软冷却（对其他模型仍可选）
-// → /healthz 必须 200，与 chat 的模型级豁免（切模型立即可用）同口径。
-// 回归：此前 ServableNow 只看账号级 healthy，"全号被 v4.1 限流但 glm 可用"时误报 503。
-func TestHealthz200WhenAllModelExempt(t *testing.T) {
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
-	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
-	// 账号级 healthy 已为 0（冷却中），但模型豁免使 chat 对非 glm 请求仍可达。
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d want 200 (model-exempt account keeps pool servable)", rec.Code)
-	}
-}
-
-// TestHealthz200WhenHealthy 有健康账号 → 200。
+// TestHealthz200WhenHealthy: есть здоровый номер — 200.
 func TestHealthz200WithHealthy(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
@@ -1581,9 +1215,9 @@ func TestHealthz200WithHealthy(t *testing.T) {
 	}
 }
 
-// TestHealthzServiceIdentity /healthz 无论 200 还是 503 都必须带网关身份标识
-// （响应体 service 字段 + X-Service 头）：宿主探测打到同端口的旧服务/其他服务时，
-// 对方即使返回 2xx 也不带本标识，宿主据此判"假成功"。
+// TestHealthzServiceIdentity: /healthz и при 200, и при 503 обязан нести идентификатор шлюза
+// (поле service в теле + заголовок X-Service): когда проба хоста бьёт в старый/чужой сервис на том же порту,
+// тот даже при ответе 2xx не несёт наш идентификатор, и хост по нему распознаёт «ложный успех».
 func TestHealthzServiceIdentity(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1617,8 +1251,8 @@ func TestHealthzServiceIdentity(t *testing.T) {
 	}
 }
 
-// TestHealthzServiceIdentityWithoutAuth /healthz 保持无鉴权（负载均衡友好）：
-// 配了 api_key 也不要求 Bearer，身份字段照常返回。
+// TestHealthzServiceIdentityWithoutAuth: /healthz остаётся без авторизации (дружелюбен к балансировщикам):
+// даже с настроенным api_key Bearer не требуем, поле идентификатора возвращаем как было.
 func TestHealthzServiceIdentityWithoutAuth(t *testing.T) {
 	h := NewHandler(Config{
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
@@ -1639,14 +1273,14 @@ func TestStatusRequiresAuth(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New(), APIKey: "secret"})
 
-	// 无 token → 401
+	// Без token — 401
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
 	if rec.Code != 401 {
 		t.Errorf("no token: code=%d", rec.Code)
 	}
 
-	// 带 token → 200
+	// С token — 200
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/status", nil)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -1655,7 +1289,7 @@ func TestStatusRequiresAuth(t *testing.T) {
 		t.Errorf("with token: code=%d", rec.Code)
 	}
 
-	// /healthz 无鉴权仍 200
+	// /healthz без авторизации всё равно 200
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != 200 {
@@ -1663,16 +1297,16 @@ func TestStatusRequiresAuth(t *testing.T) {
 	}
 }
 
-// TestContentBlockedTriggersDegradedRetry passthrough 模式下首请求 400（11128 文案）
-// → 降级重试（Degraded）→ 200，客户端无感。验证第二次出站 body 为 Degraded。
+// TestContentBlockedTriggersDegradedRetry: в режиме passthrough первый запрос 400 (текст 11128)
+// — деградированный повтор (Degraded) — 200, клиент не замечает. Проверяем, что второй исходящий body — Degraded.
 func TestContentBlockedTriggersDegradedRetry(t *testing.T) {
-	// 记录每次出站请求体，断言第二次为 Degraded 文本。
+	// Пишем каждый исходящий body, assert'им, что второй — текст Degraded.
 	var bodies [][]byte
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			raw, _ := io.ReadAll(r.Body)
 			bodies = append(bodies, raw)
-			// 首次（body 含原始 system）返回 400 内容拦截；后续返回 200。
+			// Первый (body с исходным system) возвращает 400 контент-блок; дальше возвращаем 200.
 			if len(bodies) == 1 {
 				return &http.Response{
 					StatusCode: 400,
@@ -1692,7 +1326,7 @@ func TestContentBlockedTriggersDegradedRetry(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"原始指纹"},{"role":"user","content":"hi"}]}`))
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"原始指纹"},{"role":"user","content":"hi"}]}`)) // данные: входной body с исходным отпечатком (значение content), не переводим
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -1701,16 +1335,17 @@ func TestContentBlockedTriggersDegradedRetry(t *testing.T) {
 	if len(bodies) != 2 {
 		t.Fatalf("want 2 upstream calls (first 400 + retry), got %d", len(bodies))
 	}
-	// 第二次出站 body 的 messages 头部 system 内容应为 Degraded 文本。
+	// В голове messages второго исходящего body содержимое system должно быть текстом Degraded.
 	if !strings.Contains(string(bodies[1]), prompt.Degraded) {
 		t.Errorf("second body should contain Degraded prompt: %s", bodies[1])
 	}
+	// данные: ищем исходный отпечаток-фикстуру «原始指纹» (значение-данные), не переводим
 	if strings.Contains(string(bodies[1]), "原始指纹") {
 		t.Errorf("second body should not contain original system: %s", bodies[1])
 	}
 }
 
-// TestContentBlockedStickyDegraded 降级后新请求直达 Degraded（不再先撞 400）。
+// TestContentBlockedStickyDegraded: после деградации новые запросы идут сразу на Degraded (больше не бьются сначала о 400).
 func TestContentBlockedStickyDegraded(t *testing.T) {
 	var firstCall bool
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -1723,23 +1358,23 @@ func TestContentBlockedStickyDegraded(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
 
-	// 首请求触发降级 → 200。
+	// Первый запрос триггерит деградацию — 200.
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"x"},{"role":"user","content":"hi"}]}`)))
 	if rec.Code != 200 {
 		t.Fatalf("first req code=%d", rec.Code)
 	}
-	// 降级粘性：新请求 Active()=true，body 已被 Rewrite(Degraded)，上游首字节即 200。
-	// 但 fake 上游只对 firstCall 返回 400，之后都 200，无法区分"直达"与"重试"。
-	// 用 degrade.Active() 直接断言粘性生效。
+	// Липкость деградации: у нового запроса Active()=true, body уже Rewrite(Degraded), апстрим с первого байта даёт 200.
+	// Но fake-апстрим возвращает 400 только на firstCall, дальше всё 200 — «сразу» от «повтора» не отличить.
+	// Липкость напрямую assert'им через degrade.Active().
 	if !h.degrade.Active() {
 		t.Fatal("degrade should be active after trigger")
 	}
 }
 
-// TestContentBlockedCustomModeDoesNotDegrade custom 模式不触发降级重试
-// （custom 已用自有提示词替换，不应再有 system 来源误报；若仍拦则回 400 content_blocked）。
+// TestContentBlockedCustomModeDoesNotDegrade: режим custom деградированный повтор не триггерит
+// (custom уже заменил собственным промптом, ложных system-источников быть не должно; если всё равно 400 — идём существующим путём ошибки).
 func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":11128,"msg":"blocked by security policy"}`, false
@@ -1750,35 +1385,22 @@ func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"system","content":"old"},{"role":"user","content":"hi"}]}`)))
-	// custom 模式下内容拦截直接回 400 content_blocked，不降级重试、不轮转、不暴露账号语义。
-	if rec.Code != 400 {
-		t.Fatalf("code=%d want 400 (custom does not degrade)", rec.Code)
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, `"code":"content_blocked"`) {
-		t.Errorf("want content_blocked code: %s", body)
-	}
-	if !strings.Contains(body, "触发网站风控违禁词") || !strings.Contains(body, "规则[违禁词]") {
-		t.Errorf("want firewall message with keyword, not error code: %s", body)
-	}
-	for _, leak := range []string{"11128", "account", "accounts", "账号", "upstream", "cooling", "no_healthy"} {
-		if strings.Contains(strings.ToLower(body), leak) {
-			t.Errorf("must not leak %q: %s", leak, body)
-		}
+	// В режиме custom 400 сразу возвращает 503 (все номера ротацией провалились), деградированного повтора нет.
+	if rec.Code != 503 {
+		t.Fatalf("code=%d want 503 (custom does not degrade)", rec.Code)
 	}
 	if h.degrade.Active() {
 		t.Error("degrade should NOT be active in custom mode")
 	}
 }
 
-// TestContentBlockedDoesNotPenalizeAccount ErrContentBlocked 不罚账号（无冷却/熔断/NoteError），
-// 且 passthrough 降级重试后第二次仍拦 → 立即 400 content_blocked（不轮转、不泄露上游错误码）。
+// TestContentBlockedDoesNotPenalizeAccount: ErrContentBlocked номер не наказывает (без охлаждения/пробоя/NoteError).
 func TestContentBlockedDoesNotPenalizeAccount(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":11128,"msg":"blocked by security policy"}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	// 熔断阈值 1：若误罚 NoteError 一次即熔断；content_blocked 不应喂熔断。
+	// Порог пробоя 1: ложное наказание через NoteError сразу пробило бы; content_blocked пробой кормить не должен.
 	p.SetBreaker(1, time.Hour, time.Hour)
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
 
@@ -1786,128 +1408,21 @@ func TestContentBlockedDoesNotPenalizeAccount(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
 
-	// passthrough 首遇（无原始 system，实际无降级重试）→ 内容拦截直接回 400 content_blocked。
-	if rec.Code != 400 {
-		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body)
-	}
-	if !strings.Contains(rec.Body.String(), `"code":"content_blocked"`) {
-		t.Errorf("passthrough retry-still-blocked should return content_blocked: %s", rec.Body)
-	}
-
 	st, _ := p.Status("u1")
 	if st.Cooling || st.Disabled || st.ErrTotal != 0 {
 		t.Fatalf("ErrContentBlocked should not penalize account: %+v", st)
 	}
 }
 
-// TestContentBlockedSecondHitReturns400 passthrough 首遇降级重试、第二次仍拦 → 立即 400
-// content_blocked：**不轮转**（多账号池也只打一次）、**不罚账号**、防火墙文案不含账号/错误码。
-func TestContentBlockedSecondHitReturns400(t *testing.T) {
-	calls := 0
-	up := &upstream.Client{
-		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			calls++
-			return &http.Response{
-				StatusCode: 400,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"code":11128,"msg":"blocked by security policy"}`)),
-			}, nil
-		})},
-		ChatBaseCN: "https://fake.example",
-	}
-	p := testPoolWith(
-		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
-		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
-	)
-	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"system","content":"原始指纹"},{"role":"user","content":"hi"}]}`)))
-
-	// passthrough 首遇（body 含原始 system）→ 降级重试一次；第二次仍拦 → 立即 400，不轮转。
-	if rec.Code != 400 {
-		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body)
-	}
-	if calls != 2 {
-		t.Errorf("want exactly 2 upstream calls (first 400 + one degraded retry, then stop), got %d", calls)
-	}
-	body := rec.Body.String()
-	if !assertJSONErrorCode(t, body, "content_blocked") {
-		return
-	}
-	for _, leak := range []string{"11128", "account", "accounts", "账号", "upstream", "cooling", "disabled", "no_healthy"} {
-		if strings.Contains(strings.ToLower(body), leak) {
-			t.Errorf("must not leak %q: %s", leak, body)
-		}
-	}
-	// 不轮转 ⇒ 两个账号都未被施加任何处罚（无冷却/禁用/熔断计数）。
-	for _, uid := range []string{"u1", "u2"} {
-		st, _ := p.Status(uid)
-		if st.Cooling || st.Disabled || st.ErrTotal != 0 {
-			t.Fatalf("content_blocked must not penalize any account: uid=%s status=%+v", uid, st)
-		}
-	}
-}
-
-// TestContentBlockedReturnsFirewallMessage 内容拦截最终失败时回 400 content_blocked，
-// 文案为网关防火墙口径（含分类关键词），不含账号/冷却/upstream/错误码前缀。
-func TestContentBlockedReturnsFirewallMessage(t *testing.T) {
-	calls := 0
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		calls++
-		return 400, `{"code":11128,"msg":"blocked by security policy: content contains NSFW material"}`, false
-	})
-	p := testPoolWith(
-		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
-		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
-	)
-	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "custom", PromptText: "SYS"})
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
-	if rec.Code != 400 {
-		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body)
-	}
-	// custom 模式不走降级，因此只应打一次上游（不轮转第二个账号）。
-	if calls != 1 {
-		t.Errorf("content_blocked must not rotate accounts, calls=%d", calls)
-	}
-
-	var envelope struct {
-		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
-		t.Fatalf("not openai error json: %v body=%s", err, rec.Body)
-	}
-	if envelope.Error.Code != "content_blocked" {
-		t.Errorf("code=%q want content_blocked", envelope.Error.Code)
-	}
-	want := "触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则[nsfw]，已被拦截。请修改内容后重试。"
-	if envelope.Error.Message != want {
-		t.Errorf("message=%q want %q", envelope.Error.Message, want)
-	}
-	for _, leak := range []string{"account", "accounts", "账号", "upstream", "cooling", "disabled", "no_healthy", "11128"} {
-		if strings.Contains(strings.ToLower(rec.Body.String()), leak) {
-			t.Errorf("must not leak %q: %s", leak, rec.Body)
-		}
-	}
-}
-
-// TestCustomModeFingerprintSanitizePreserved custom 端到端：user 消息含 Claude Code
-// 指纹句（PR39 fixture 串）→ Rewrite 注入自有 system → 经 sanitize → 出站 body 中
-// 该指纹被改写、system 为自有提示词。证明两层（提示词替换 + 清洗）叠加工作。
+// TestCustomModeFingerprintSanitizePreserved: custom сквозно — сообщение user содержит фразу-отпечаток Claude Code
+// (строка-фикстура PR39) — Rewrite inject'ит собственный system — через sanitize — в исходящем body
+// этот отпечаток переписан, system — собственный промпт. Доказывает, что два слоя (замена промпта + чистка) складываются.
 //
-// 两层各自职责（互不替代）：
-//   - prompt.Rewrite 替换 system/developer 消息（消灭 system 来源指纹）；
-//   - sanitizeMessages 改写 user/assistant 消息中残留的指纹串（兜底用户上下文）。
+// У двух слоёв свои обязанности (не заменяют друг друга):
+//   - prompt.Rewrite заменяет сообщения system/developer (убивает system-источник отпечатка);
+//   - sanitizeMessages переписывает остатки отпечатка в сообщениях user/assistant (страхует пользовательский контекст).
 func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
-	// 捕获出站 body（prepareBody 已强制 stream + 归一 + 清洗后）。
+	// Захватываем исходящий body (prepareBody уже принудительно выставил stream + нормализовал + почистил).
 	var sentBody []byte
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1920,13 +1435,13 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 			}, nil
 		})},
 		ChatBaseCN:           "https://fake.example",
-		SanitizeFingerprints: true, // 开启清洗层（与生产一致）
+		SanitizeFingerprints: true, // включаем слой чистки (как в проде)
 	}
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	const customSys = "我是网关自有提示词"
+	const customSys = "我是网关自有提示词" // данные: собственный промпт-фикстура (значение), не переводим
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "custom", PromptText: customSys})
 
-	// user 消息含 Claude Code 指纹句（PR39 的 fixture 串，逐字精确指纹）。
+	// Сообщение user содержит фразу-отпечаток Claude Code (строка-фикстура PR39, дословно точный отпечаток).
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
 		"model":"glm-5.2",
 		"stream":true,
@@ -1941,15 +1456,15 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	out := string(sentBody)
-	// 1) system 为自有提示词，旧 system 内容零残留。
+	// 1) system — собственный промпт, остатков старого system ноль.
 	if !strings.Contains(out, customSys) {
 		t.Errorf("out body should contain custom system prompt: %s", out)
 	}
 	if strings.Contains(out, "official CLI for Claude.") && strings.Contains(out, "You are Claude Code, Anthropic's") {
-		// 旧 system 原文（含句点）不应以 system 角色出现；但 sanitize 把它改写为
-		// "...official CLI tool for Claude."，所以原文 fingerprint 串应消失。
+		// Старый исходник system (включая точку) не должен появляться в роли system; но sanitize переписывает его в
+		// «...official CLI tool for Claude.», поэтому исходная строка fingerprint должна исчезнуть.
 	}
-	// 原始指纹串（逐字精确匹配）在出站 body 中应被改写：
+	// Исходная строка отпечатка (дословно точное совпадение) в исходящем body должна быть переписана:
 	// "official CLI for Claude." → "official CLI tool for Claude."
 	// "Main branch (" → "Default branch ("
 	if strings.Contains(out, "official CLI for Claude.") {
@@ -1958,14 +1473,14 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	if strings.Contains(out, "Main branch (you will usually use this for PRs)") {
 		t.Errorf("branch fingerprint not rewritten by sanitize in user msg: %s", out)
 	}
-	// 改写后的痕迹应在（证明 sanitize 层生效，不是"全删了"）。
+	// След переписывания должен быть (доказывает, что слой sanitize сработал, а не «всё стёрли»).
 	if !strings.Contains(out, "official CLI tool for Claude.") {
 		t.Errorf("sanitized identity rewrite missing: %s", out)
 	}
 	if !strings.Contains(out, "Default branch (you will usually use this for PRs)") {
 		t.Errorf("sanitized branch rewrite missing: %s", out)
 	}
-	// 2) messages 头部恰好一条 system = 自有提示词（Rewrite 已删旧 system）。
+	// 2) в голове messages ровно один system = собственный промпт (Rewrite уже снёс старый system).
 	var obj map[string]any
 	if err := json.Unmarshal(sentBody, &obj); err != nil {
 		t.Fatalf("out body not json: %v %s", err, out)
@@ -1983,90 +1498,5 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	}
 	if systemCount != 1 {
 		t.Errorf("want exactly 1 system message, got %d (all=%v)", systemCount, msgs)
-	}
-}
-
-// TestStatusRealmTotals /status 新增 realm_totals 字段：混合池各域计数独立分组，
-// 既有 total/healthy/cooling/disabled 汇总键零回归（仍全池口径）。
-func TestStatusRealmTotals(t *testing.T) {
-	auth.SetGlobalEnabled(true)
-	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
-
-	p := testPoolWith(
-		&auth.Auth{UID: "cn1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
-		&auth.Auth{UID: "cn2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
-		&auth.Auth{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
-		&auth.Auth{UID: "g2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
-	)
-	p.Cooldown("cn2", pool.CoolSoft, time.Hour, "429 rate limit")
-	p.Disable("g2", "session dead")
-
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
-	}
-	var body struct {
-		Total, Healthy, Cooling, Disabled int
-		RealmTotals                       map[string]map[string]int `json:"realm_totals"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("status not json: %v body=%s", err, rec.Body)
-	}
-	// 既有汇总键零回归：全池 = 4 账号。
-	if body.Total != 4 || body.Healthy != 2 || body.Cooling != 1 || body.Disabled != 1 {
-		t.Errorf("summary = %d/%d/%d/%d want 4/2/1/1 (zero regression)", body.Total, body.Healthy, body.Cooling, body.Disabled)
-	}
-	if body.RealmTotals == nil {
-		t.Fatal("realm_totals missing from /status")
-	}
-	cn := body.RealmTotals["cn"]
-	if cn["total"] != 2 || cn["healthy"] != 1 || cn["cooling"] != 1 || cn["disabled"] != 0 {
-		t.Errorf("realm_totals.cn=%v want total=2 healthy=1 cooling=1 disabled=0", cn)
-	}
-	g := body.RealmTotals["global"]
-	if g["total"] != 2 || g["healthy"] != 1 || g["cooling"] != 0 || g["disabled"] != 1 {
-		t.Errorf("realm_totals.global=%v want total=2 healthy=1 cooling=0 disabled=1", g)
-	}
-}
-
-// TestHealthzRealmServable /healthz 新增 realm_servable 字段：各域可服务状态独立暴露。
-// global 全冷却 + cn 空闲 → realm_servable.global=false, cn=true；HTTP 仍 200（存在性语义零回归）。
-func TestHealthzRealmServable(t *testing.T) {
-	auth.SetGlobalEnabled(true)
-	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
-
-	p := testPoolWith(
-		&auth.Auth{UID: "cn1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
-		&auth.Auth{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
-		&auth.Auth{UID: "g2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"},
-	)
-	// global 全冷却（一软一硬），cn 空闲。
-	p.Cooldown("g1", pool.CoolSoft, time.Hour, "429 rate limit")
-	p.Cooldown("g2", pool.CoolHard, time.Hour, "余额不足")
-
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
-	// 存在性语义零回归：任一域可服务 → 200。
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d want 200 (cn servable keeps existence semantics)", rec.Code)
-	}
-	var resp struct {
-		Healthy       int             `json:"healthy"`
-		RealmServable map[string]bool `json:"realm_servable"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
-	}
-	if resp.Healthy != 1 {
-		t.Errorf("healthy=%d want 1 (only cn1)", resp.Healthy)
-	}
-	if resp.RealmServable["cn"] != true {
-		t.Errorf("realm_servable.cn=%v want true", resp.RealmServable["cn"])
-	}
-	if resp.RealmServable["global"] != false {
-		t.Errorf("realm_servable.global=%v want false", resp.RealmServable["global"])
 	}
 }

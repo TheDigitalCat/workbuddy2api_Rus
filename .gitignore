@@ -31,6 +31,6 @@ PLAN.md
 SPEC.md
 docs/
 
-# 设计/计划文档（但 README.md 必须进版本库）
+# Проектная документация (но README.md обязан входить в репозиторий)
 *.md
 !README.md

@@ -1,5 +1,5 @@
-// Pool 账号池核心：结构定义、构造（New/Set* 注入）、在途租约（Acquire/Release）
-// 与账号增删（Add/SyncToDir/upsertLocked）。选号/冷却/状态/持久化见同包其他文件。
+// Pool — ядро пула аккаунтов: определение структуры, конструирование (инъекции New/Set*), транзитные аренды (Acquire/Release)
+// и добавление/удаление аккаунтов (Add/SyncToDir/upsertLocked). Выбор номера/кулдаун/состояние/персистентность — в других файлах пакета.
 package pool
 
 import (
@@ -14,30 +14,30 @@ type Pool struct {
 	mu      sync.RWMutex
 	byUID   map[string]*entry
 	stateFp string
-	dirty   atomic.Bool // 内存有变更待落盘
-	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
-	// SaveState/LoadState 经它接线，与本地 state.json 并存作启动恢复备份。
+	dirty   atomic.Bool // в памяти есть изменения, ждущие записи на диск
+	// store — зеркало снапшотов состояния пула (redisstore.Store); nil = без зеркала (Redis не настроен / вне Noop тоже может быть nil).
+	// SaveState/LoadState подключены через него, сосуществует с локальным state.json как бэкап для восстановления при старте.
 	store StoreSnapshotter
-	// 熔断器调优（SetBreaker 注入；默认值见 defaultBreaker*）。
+	// Настройка прерывателя (инъекция SetBreaker; значения по умолчанию — см. defaultBreaker*).
 	breakerThreshold   int
 	breakerCooldown    time.Duration
 	breakerCooldownMax time.Duration
-	// softRateMax 软冷却指数退避的封顶（SetSoftRateMax 注入；默认 defaultSoftRateMax）。
+	// softRateMax — потолок экспоненциального отката мягкого кулдауна (инъекция SetSoftRateMax; по умолчанию defaultSoftRateMax).
 	softRateMax time.Duration
-	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
+	// Настройка трёхфакторного взвешивания (инъекция SetWeights; значения по умолчанию — см. defaultIdle*).
 	idleWeightPerHour float64
 	idleWeightMax     float64
-	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
+	// maxInFlight — максимум транзитных запросов на аккаунт; 0 = без ограничений (аренда выключена).
 	maxInFlight int
-	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
-	// 生产代码不应设置此字段。
+	// randInt64N — только для инъекции детерминированного источника случайности в тестах; при nil используется глобальный источник math/rand/v2.
+	// Производственный код это поле задавать не должен.
 	randInt64N func(n int64) int64
-	// persistFails 本地 state.json 连续落盘失败计数（仅 saveLocked 在持锁下读写，无需 atomic）。
-	// 用于落盘失败的日志节流：首败/每 N 次提醒/恢复各打一条，避免磁盘满时刷屏。
+	// persistFails — счётчик последовательных ошибок записи локального state.json на диск (читается/пишется только saveLocked под замком, atomic не нужен).
+	// Нужен для троттлинга логов ошибок записи: первая ошибка/каждое N-е напоминание/восстановление — по одной строке, чтобы не спамить при полном диске.
 	persistFails int
 }
 
-// defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
+// defaultBreaker* — параметры прерывателя по умолчанию (ориентир FreeBuff2API).
 func New(stateFp string) *Pool {
 	p := &Pool{
 		byUID:              map[string]*entry{},
@@ -55,7 +55,7 @@ func New(stateFp string) *Pool {
 	return p
 }
 
-// SetBreaker 注入熔断器参数（main 从 config 解析后调用）。非正值保留原值（用默认）。
+// SetBreaker внедряет параметры прерывателя (main вызывает после разбора config). Неположительные значения сохраняют текущие (по умолчанию).
 func (p *Pool) SetBreaker(threshold int, cooldown, cooldownMax time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -70,8 +70,8 @@ func (p *Pool) SetBreaker(threshold int, cooldown, cooldownMax time.Duration) {
 	}
 }
 
-// SetSoftRateMax 注入软冷却指数退避的封顶时长（main 从 config 解析后调用）。
-// 非正值保留原值（用默认 2h），风格同 SetBreaker。
+// SetSoftRateMax внедряет потолок экспоненциального отката мягкого кулдауна (main вызывает после разбора config).
+// Неположительные значения сохраняют текущее (по умолчанию 2h), стиль как у SetBreaker.
 func (p *Pool) SetSoftRateMax(d time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -80,7 +80,7 @@ func (p *Pool) SetSoftRateMax(d time.Duration) {
 	}
 }
 
-// SetWeights 注入三因子加权的闲置补偿参数。非正值保留原值（用默认）。
+// SetWeights внедряет параметры компенсации простоя для трёхфакторного взвешивания. Неположительные значения сохраняют текущие (по умолчанию).
 func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -92,7 +92,7 @@ func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	}
 }
 
-// SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。
+// SetMaxInFlight внедряет максимум транзитных запросов на аккаунт; 0 = без ограничений. Отрицательные значения сохраняют текущее.
 func (p *Pool) SetMaxInFlight(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -101,17 +101,17 @@ func (p *Pool) SetMaxInFlight(n int) {
 	}
 }
 
-// SetStore 注入池状态快照镜像（redisstore.Store）。nil 表示不镜像（纯本地恢复）。
-// 必须在 SyncToDir 之前调用，使"择新恢复"发生在账号对齐之前。
+// SetStore внедряет зеркало снапшотов состояния пула (redisstore.Store). nil означает без зеркала (только локальное восстановление).
+// Вызывать до SyncToDir, чтобы «восстановление новейшего» происходило до сверки аккаунтов.
 func (p *Pool) SetStore(s StoreSnapshotter) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.store = s
 }
 
-// RestoreFromSnapshot 择新恢复：比较本地 state.json 与 Redis 快照，采用较新者。
-// 无快照、快照无 savedAt、或本地不存在/不可读时，都会被判定为"本地优先/跳过快照"，
-// 同时打一条恢复来源日志。必须在 SyncToDir 之前调用（SyncToDir 只增删不入值）。
+// RestoreFromSnapshot — восстановление новейшего: сравнивает локальный state.json и снапшот Redis, берёт более новый.
+// Нет снапшота, у снапшота нет savedAt, локальный файл отсутствует/нечитаем — всё это считается «приоритет локального/пропуск снапшота»,
+// плюс одна строка в лог об источнике восстановления. Вызывать до SyncToDir (SyncToDir только добавляет/удаляет, значений не вносит).
 func (p *Pool) Acquire(uid string) bool {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
@@ -121,7 +121,7 @@ func (p *Pool) Acquire(uid string) bool {
 		return false
 	}
 	if limit <= 0 {
-		// 不限：计数仍累加（供状态观测），但永不拒绝。
+		// Без ограничений: счётчик всё равно растёт (для наблюдения за состоянием), но отказов никогда нет.
 		e.inFlight.Add(1)
 		return true
 	}
@@ -136,7 +136,7 @@ func (p *Pool) Acquire(uid string) bool {
 	}
 }
 
-// Release 释放一个在途名额。幂等减到 0 为止（防重复释放扣成负数）。
+// Release освобождает одно транзитное место. Идемпотентно уменьшает до 0 (защита от двойного освобождения в минус).
 func (p *Pool) Release(uid string) {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
@@ -155,23 +155,23 @@ func (p *Pool) Release(uid string) {
 	}
 }
 
-// SetRandomSource 仅供测试注入确定性随机源；生产代码不应调用。
-// 注入源取 n∈[0,n) 后，pickWeighted 的抽签结果完全可预测。
+// SetRandomSource — только для инъекции детерминированного источника случайности в тестах; производственный код вызывать не должен.
+// После инъекции источника, возвращающего n∈[0,n), результат жеребьёвки pickWeighted полностью предсказуем.
 func (p *Pool) SetRandomSource(fn func(n int64) int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.randInt64N = fn
 }
 
-// startFlusher 每 flushInterval 检查 dirty 标志，有变更则 saveLocked 落盘。
+// startFlusher каждые flushInterval проверяет флаг dirty, при изменениях пишет на диск через saveLocked.
 func (p *Pool) Add(a *auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.upsertLocked(a)
 }
 
-// SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
-// 剔除结果持久化回 state.json，避免已删账号在下次启动时被 load() 复活。
+// SyncToDir сверяет пул с последним результатом сканирования: новые аккаунты добавляются, исчезнувшие удаляются (состояние сохраняется).
+// Результат удаления сохраняется обратно в state.json, чтобы удалённые аккаунты не воскресали через load() при следующем старте.
 func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -192,14 +192,14 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	}
 }
 
-// upsertLocked 更新或插入单个账号；已存在则只换凭证、保留 credits/cooling 状态。
-// 调用方必须已持有 p.mu；Add 与 SyncToDir 共用此 upsert 逻辑。
+// upsertLocked обновляет или вставляет один аккаунт; если уже есть — меняет только учётные данные, сохраняя состояние credits/cooling.
+// Вызывающий код уже должен держать p.mu; Add и SyncToDir используют эту общую логику upsert.
 func (p *Pool) upsertLocked(a *auth.Auth) {
 	if e, ok := p.byUID[a.UID]; ok {
-		e.a = a // 保留 credits/cooling 状态
+		e.a = a // сохраняем состояние credits/cooling
 		return
 	}
 	p.byUID[a.UID] = &entry{a: a}
 }
 
-// Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
+// Pick возвращает healthy-аккаунт с наибольшим балансом; если доступных нет — nil.

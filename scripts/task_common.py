@@ -1,39 +1,24 @@
 #!/usr/bin/env python3
-"""一次性积分任务脚本的共享函数库.
+"""Общая библиотека одноразовых скриптов балловых заданий.
 
-与 probe_active.py 同风格：从 auths/ 读账号凭证，封装 growth 域 / report 域
-请求，供 task_*.py 复用。全部默认 dry-run（写动作由调用脚本显式 --yes 放行）。
+В том же стиле, что probe_active.py: читает учётные данные аккаунтов из auths/,
+оборачивает запросы доменов growth / report для переиспользования в task_*.py.
+По умолчанию везде dry-run (записывающие действия разрешаются явным --yes
+в вызывающем скрипте).
 
-端点权威来源（Go 代码实测 + 本次实测确认）：
-  - chat 域（copilot.tencent.com）：growth / tasks / buddy / streak / chat/completions
-  - billing 域（www.codebuddy.cn）：/v2/report
+Авторитетный источник эндпоинтов (код Go + текущие замеры):
+  - домен chat (copilot.tencent.com): growth / tasks / buddy / streak / chat/completions
+  - домен billing (www.codebuddy.cn): /v2/report
   - accept : POST /v2/activity/growth/tasks/accept  {"task_codes":[code]}
   - claim  : POST /v2/activity/growth/tasks/reward/claim {"task_code":code}
 """
 import json, os, time, glob, urllib.request, urllib.error
 
-
-def _resolve_auths_dir() -> str:
-    """解析 auths 凭证目录：WB2A_AUTHS > 仓库根 auths/ > /root/workbuddy2api/auths 兜底。
-
-    env 显式覆盖最优先；本地仓库 auths/ 按 __file__ 自定位（脚本位于 scripts/ 下，
-    仓库根为其上两级），非 Linux 部署（auth 不在 /root/workbuddy2api）自动回落
-    本地 auths/；兜底保持 Linux 服务器行为不变。
-    """
-    env = os.environ.get("WB2A_AUTHS")
-    if env:
-        return env
-    local = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "auths")
-    if os.path.isdir(local):
-        return local
-    return "/root/workbuddy2api/auths"
-
-
-AUTHS = _resolve_auths_dir()
+AUTHS = "/root/workbuddy2api/auths"
 CHAT_BASE = "https://copilot.tencent.com"   # growth / tasks / buddy / streak / chat
 BILL_BASE = "https://www.codebuddy.cn"      # report / billing
 
-# growth 域常量（travel.go / report.go 与本次实测对齐）
+# Константы домена growth (сверены с travel.go / report.go и текущими замерами)
 PATH_LIST_TASKS     = "/v2/activity/growth/tasks"
 PATH_ACCEPT_TASKS   = "/v2/activity/growth/tasks/accept"
 PATH_CLAIM_REWARD   = "/v2/activity/growth/tasks/reward/claim"
@@ -47,11 +32,9 @@ CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2"
 
 
 def load_auth(uid_or_file: str) -> dict:
-    """从 auths/ 加载账号凭证，uid_or_file 为 uid 前缀或 auths 文件名。
+    """Загрузить учётные данные аккаунта из auths/: uid_or_file — префикс uid или имя файла в auths.
 
-    返回 {token, uid, domain, nick, file, realm} 六元组。
-    realm 读取兼容嵌套形（`auth.realm`，login.sh --realm=global 落盘形态）与
-    扁平形（顶层 `realm`）；两种都缺省 → "cn"（老 CN 凭证零回归）。
+    Возвращает пятёрку {token, uid, domain, nick, file}.
     """
     if os.path.sep in uid_or_file or uid_or_file.endswith(".json"):
         p = uid_or_file
@@ -61,27 +44,13 @@ def load_auth(uid_or_file: str) -> dict:
         pre = uid_or_file
         hits = glob.glob(os.path.join(AUTHS, f"workbuddy-{pre}*.json"))
         if not hits:
-            raise SystemExit(f"no auth for {pre}")
+            raise SystemExit(f"нет auth для {pre}")
         p = hits[0]
     d = json.load(open(p))
     a, acc = d["auth"], d["account"]
-    realm = a.get("realm") or d.get("realm") or ""
     return {"token": a["accessToken"], "domain": a.get("domain") or "",
             "uid": acc["uid"], "nick": acc.get("nickname", ""),
-            "file": os.path.basename(p), "realm": realm}
-
-
-def auth_is_global(auth: dict) -> bool:
-    """判定账号是否属于 global realm：realm==global 或 domain 后缀 .workbuddy.ai。
-
-    与 Go auth.Realm() 的判定口径一致（显式 realm 优先于 domain 回落）。
-    供 CN-only 任务脚本跳过 global 账号、明确提示，避免把 global token 打向
-    copilot.tencent.com/codebuddy.cn（全球版无任务中心，打 CN 端点属错误行为）。
-    """
-    if (auth.get("realm") or "").strip().lower() == "global":
-        return True
-    d = (auth.get("domain") or "").strip().lower()
-    return d == "workbuddy.ai" or d.endswith(".workbuddy.ai")
+            "file": os.path.basename(p)}
 
 
 def chat_base(auth: dict) -> str:
@@ -127,17 +96,17 @@ def _request(auth, method, base, path, body=None, headers=None, timeout=30):
 
 
 def do_get(auth, base, path, headers=None) -> tuple:
-    """GET 读请求，返回 (status, dict)。"""
+    """GET-запрос на чтение, возвращает (status, dict)."""
     return _request(auth, "GET", base, path, None, headers)
 
 
 def do_post(auth, base, path, body, headers=None) -> tuple:
-    """POST 写请求，返回 (status, dict)。body 为 dict。"""
+    """POST-запрос на запись, возвращает (status, dict). body — dict."""
     return _request(auth, "POST", base, path, body, headers)
 
 
 def list_tasks(auth) -> list:
-    """GET /v2/activity/growth/tasks 全量任务列表（元素为原始 dict）。"""
+    """Полный список заданий GET /v2/activity/growth/tasks (элементы — исходные dict)."""
     st, d = do_get(auth, chat_base(auth), PATH_LIST_TASKS)
     if st != 200:
         raise RuntimeError(f"list_tasks http={st}")
@@ -146,7 +115,7 @@ def list_tasks(auth) -> list:
 
 
 def task_status(auth, task_code) -> dict | None:
-    """查单个任务当前状态；找不到返回 None。"""
+    """Текущее состояние одного задания; если не найдено — None."""
     for t in list_tasks(auth):
         if t.get("task_code") == task_code:
             return t
@@ -154,19 +123,19 @@ def task_status(auth, task_code) -> dict | None:
 
 
 def accept_tasks(auth, task_codes) -> tuple:
-    """POST accept 任务（not_accepted → accepted）。返回 (status, resp)。"""
+    """POST accept заданий (not_accepted → accepted). Возвращает (status, resp)."""
     return do_post(auth, chat_base(auth), PATH_ACCEPT_TASKS,
                    {"task_codes": task_codes})
 
 
 def claim_reward(auth, task_code) -> tuple:
-    """POST claim 领取奖励（任务已 complete 后可领）。重复领返回业务错误，安全。"""
+    """POST claim для получения награды (после complete задания). Повторное получение вернёт бизнес-ошибку, безопасно."""
     return do_post(auth, chat_base(auth), PATH_CLAIM_REWARD,
                    {"task_code": task_code})
 
 
 def get_streak(auth) -> int:
-    """GET /activity/growth/streak 连登天数（只读 oracle）。失败返回 -1 记日志。"""
+    """GET /activity/growth/streak — дни серии подряд (только чтение, oracle). При сбое возвращает -1."""
     st, d = do_get(auth, chat_base(auth), PATH_STREAK)
     if st != 200:
         return -1
@@ -175,10 +144,10 @@ def get_streak(auth) -> int:
 
 def chat_event(auth, conversation_id=None, model_id="deepseek-v4-flash",
                model_name="DeepSeek V4 Flash", mode="craft"):
-    """客户端 chat_request_send 事件完整形状（照抄 report.go / probe_active.py）。
+    """Полная форма события chat_request_send клиента (скопирована из report.go / probe_active.py).
 
-    必须带 userId（=账号 uid），缺失则服务端 200 但静默丢弃。
-    model_id/name 可换（如 GLM-5.2），供 model_chat 对齐实际模型。
+    Обязательно содержит userId (= uid аккаунта), без него сервер вернёт 200, но тихо отбросит.
+    model_id/name можно менять (напр. GLM-5.2) для выравнивания под model_chat.
     """
     now = int(time.time() * 1000)
     cid = conversation_id or f"task-{now}"
@@ -198,10 +167,11 @@ def chat_event(auth, conversation_id=None, model_id="deepseek-v4-flash",
 
 def report_activity(auth, count=1, gap=1.05, model_id="deepseek-v4-flash",
                     model_name="DeepSeek V4 Flash", mode="craft") -> list:
-    """向 {billing}/v2/report 上报 count 条 chat_request_send。
+    """Отправить count штук chat_request_send в {billing}/v2/report.
 
-    每次间隔 >= gap 秒（默认 1.05，匹配 probe_active.py 的同接口限速口径）。
-    返回 [(status, code), ...] 汇总。
+    Интервал каждый раз >= gap секунд (по умолчанию 1.05, тот же порог троттлинга,
+    что в probe_active.py для того же интерфейса).
+    Возвращает сводку [(status, code), ...].
     """
     out = []
     for i in range(count):
@@ -214,19 +184,14 @@ def report_activity(auth, count=1, gap=1.05, model_id="deepseek-v4-flash",
 
 
 def chat_completion(auth, model_id="glm-5.2", prompt="hi", max_tokens=32,
-                    timeout=60, extra_var=None) -> tuple:
-    """POST {chat}/v2/chat/completions 真实对话一次（stream:true）。
+                    timeout=60) -> tuple:
+    """Один реальный диалог POST {chat}/v2/chat/completions (stream:true).
 
-    服务端强制流式（payload.go 同款口径），这里逐行读 SSE 直到 done。
-    返回 (status, first_content)。用于 Model_chat_GLM5.2 的“真实对话一次”。
-
-    extra_var（可选）：顶层 extra_vars 覆盖/新增字段（如 growthEvent），
-    模拟桌面端 requestOptions.providerData 的透传形状。
+    Сервер требует стриминг (тот же порог, что в payload.go), здесь построчно читаем SSE до done.
+    Возвращает (status, first_content). Нужно для «одного реального диалога» Model_chat_GLM5.2.
     """
     body = {"model": model_id, "messages": [{"role": "user", "content": prompt}],
             "stream": True, "max_tokens": max_tokens}
-    if extra_var:
-        body["extra_vars"] = {**(body.get("extra_vars") or {}), **extra_var}
     hdr = {"Accept": "text/event-stream"}  # SSE
     url = chat_base(auth) + PATH_CHAT
     req_headers = _headers(auth)

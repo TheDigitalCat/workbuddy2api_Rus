@@ -1,5 +1,5 @@
-// 冷却与熔断：Cooldown/CooldownSoftForModel（软退避指数升级）、软冷却封顶、
-// 熔断失败累计、签到解冻（ReenableIfCredits/reviveCoolingLocked）。
+// Кулдаун и прерыватель: Cooldown/CooldownSoftForModel (эскалация мягкого отката), потолок мягкого кулдауна,
+// накопление ошибок прерывания, разморозка чекином (ReenableIfCredits/reviveCoolingLocked).
 package pool
 
 import (
@@ -15,15 +15,15 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 	}
 }
 
-// Cooldown 冷却账号至 now+d（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）。
-// 冷却入口同时是熔断器的失败信号：喂入 fails，达到阈值按指数退避熔断（与 until 正交）。
+// Cooldown охлаждает аккаунт до now+d (мгновенный кулдаун: CoolSoft 429 / CoolHard нехватка баланса).
+// Вход кулдауна — одновременно сигнал ошибки для прерывателя: кормит fails, по порогу прерывает с экспоненциальным откатом (ортогонально until).
 //
-// CoolSoft 额外做**连续软限流指数退避**：同一账号连续触发软冷却时，实际时长按
-// d << (softStreak-1) 逐次翻倍（封顶 softRateMax，见 softDurationLocked）。
-// 首 streak=1 → 实际时长 = d，单次调用语义与旧行为一致。
-// 这就是与熔断器并存的双重升级，且是**有意为之**：软退避管"近期被限流"，
-// 在 600s 起按分钟~小时级放大；熔断管"病态反复失败"，按 30m→1h→2h→6h 长期封禁。
-// 二者喂入路径共用本入口但计数器独立（softStreak vs fails），互不污染。
+// CoolSoft дополнительно делает **экспоненциальный откат последовательных мягких лимитов**: при последовательных мягких кулдаунах одного аккаунта фактическая длительность
+// удваивается как d << (softStreak-1) (потолок softRateMax, см. softDurationLocked).
+// Первый streak=1 → фактическая длительность = d, семантика одиночного вызова как в старом поведении.
+// Это двойная эскалация параллельно с прерывателем, и это **намеренно**: мягкий откат отвечает за «недавно под лимитом»,
+// раздувается от 600s до минут~часов; прерывание отвечает за «патологически повторяющиеся ошибки», банит надолго по 30m→1h→2h→6h.
+// Путь кормления у обоих общий через этот вход, но счётчики независимы (softStreak vs fails), друг друга не загрязняют.
 func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -35,31 +35,30 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
-		// 非模型级冷却入口：清空 6004 模型级独立冷却表（modelCooldowns），
-		// 避免上一次模型级限流的模型豁免泄漏到本次**账号级**限流上
-		// （否则换模型请求会错误绕过本次冷却）。
-		e.modelCooldowns = nil
-		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
+		// Вход не модельного кулдауна: стираем след освобождения модели 6004, чтобы прошлый лимит уровня модели
+		// softRateModel не потёк в текущий лимит **уровня аккаунта** (иначе запрос со сменой модели ошибочно обойдёт этот кулдаун).
+		e.softRateModel = ""
+		p.recordBreakerFailureLocked(e) // вход кулдауна — тоже сигнал ошибки для прерывателя
 		p.dirty.Store(true)
 	}
 }
 
-// CooldownSoftForModel 429 的**模型级**软冷却入口（issue #31）。
-// 区别于 Cooldown：当上游 6004 明说「将在 … 重置」时，把 **该模型** 的冷却截止精确
-// 设为 resetAt（上游给定时间，不再靠固定基数+指数退避猜测），记录到独立的
-// modelCooldowns[model]——每模型独立计时，多个模型同时 6004 互不覆盖（这是单 until
-// 字段做不到的）。不写 until（全账号级冷却不受 6004 污染）。
+// CooldownSoftForModel — вход мягкого кулдауна **уровня модели** для 429 (issue #31).
+// Отличие от Cooldown: когда апстрим 6004 прямо говорит «сброс будет в …», конец кулдауна точно ставим в
+// resetAt (время, данное апстримом, а не угаданное из фиксированной базы+экспоненциального отката) и записываем вызвавшую модель softRateModel,
+// после чего эта модель освобождается от кулдауна (смена модели сразу доступна, см. healthyForModel).
 //
-// 收窄规则（与旧实现一致）：
-//   - resetAt 非零（6004 带解析时间）→ modelCooldowns[model].Until = min(resetAt,
-//     now+softRateMax)，ResetAt 记录上游原始墙钟（台账 ResetAt）。指数退避
-//     **不适用**：重置时间已是上游权威，再指数放大会无视它明说的恢复时刻。
-//   - resetAt 零值（6004 无时间文案 / 非 6004 的 soft）→ 完全退回 Cooldown 现状
-//     （soft_streak 指数退避 + 封顶 soft_rate_max，写 until），不记录模型（不豁免）。
+// Правила сужения:
+//   - resetAt ненулевой (6004 с разобранным временем) → until = min(resetAt, now+softRateMax),
+//     softRateModel = model. Экспоненциальный откат **не применяется**: время сброса уже авторитетно задано апстримом, дополнительное раздувание
+//     проигнорировало бы прямо названный момент восстановления (в этом и была ключевая боль issue).
+//   - resetAt нулевой (6004 без текста времени / soft не-6004) → полный откат к текущему Cooldown
+//     (экспоненциальный откат soft_streak + потолок soft_rate_max), softRateModel остаётся пустым (без освобождения).
 //
-// 熔断信号照旧喂入（冷却与熔断正交，行为与 Cooldown 一致）；softStreak 仍递增
-// （无论是否命中解析时间）——解析时间的冷却**不**参与指数退避，但 softStreak 计数
-// 照常累加，后续无时间的 6004 从当前 streak 继续退避（与任务书口径一致）。
+// Сигнал прерывания кормится как прежде (кулдаун и прерывание ортогональны, поведение как у Cooldown); softStreak всё равно растёт
+// (независимо от попадания в разобранное время), единую консистентность держит семантика вне Cooldown: кулдаун
+// с разобранным временем **не** участвует в экспоненциальном откате, но счёт softStreak штатно копится, и последующие 6004 без времени продолжают откат с текущего
+// streak — вровень с заданием «логика экспоненциального отката не меняется, сужение только в двух точках».
 func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -68,7 +67,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 		hasReset := !resetAt.IsZero()
 		d := p.softDurationLocked(base, e.softStreak)
 		if hasReset {
-			// 有上游重置时间：直接取 min(重置墙钟, now+softRateMax)，不做指数放大。
+			// Есть время сброса от апстрима: берём прямо min(настенные часы сброса, now+softRateMax), без экспоненциального раздувания.
 			now := time.Now()
 			cap := now.Add(p.softRateMaxOr())
 			if resetAt.After(cap) {
@@ -76,36 +75,25 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			} else if resetAt.After(now) {
 				d = resetAt.Sub(now)
 			} else {
-				// 重置时间已过（时钟偏移/文案过期）：冷却极短，立即恢复。
+				// Время сброса уже прошло (сдвиг часов/протухший текст): кулдаун мизерный, сразу восстанавливаем.
 				d = time.Millisecond
 			}
 		}
+		e.until = time.Now().Add(d)
 		e.coolKind = CoolSoft
 		e.reason = reason
 		if hasReset {
-			// 6004 带解析时间：写该模型的独立冷却表（不写 until）。until 截断到封顶，
-			// ResetAt 保留上游原始墙钟（台账 ResetAt 呈现真实恢复时刻）。
-			now := time.Now()
-			if e.modelCooldowns == nil {
-				e.modelCooldowns = map[string]modelCooldown{}
-			}
-			e.modelCooldowns[model] = modelCooldown{
-				Until:   now.Add(d),
-				ResetAt: resetAt,
-				Reason:  reason,
-			}
+			e.softRateModel = model // модель записываем только для 6004 с разобранным временем (граница освобождения)
 		} else {
-			// 无解析时间（普通软冷却/非 6004）：退回账号级 until 冷却，且清空模型豁免。
-			e.until = time.Now().Add(d)
-			e.modelCooldowns = nil
+			e.softRateModel = ""
 		}
-		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
+		p.recordBreakerFailureLocked(e) // вход кулдауна — тоже сигнал ошибки для прерывателя
 		p.dirty.Store(true)
 	}
 }
 
-// softRateMaxOr 返回生效的 softRateMax（未注入时按默认 2h），供封顶计算。
-// 调用方必须已持有 p.mu。
+// softRateMaxOr возвращает действующий softRateMax (если не внедрён — по умолчанию 2h) для расчёта потолка.
+// Вызывающий код уже должен держать p.mu.
 func (p *Pool) softRateMaxOr() time.Duration {
 	if p.softRateMax > 0 {
 		return p.softRateMax
@@ -113,10 +101,10 @@ func (p *Pool) softRateMaxOr() time.Duration {
 	return defaultSoftRateMax
 }
 
-// softDurationLocked 按连续软冷却次数把基数 d 指数放大：d << (streak-1)，封顶 softRateMax。
-// softRateMax 未注入（<=0）时按 defaultSoftRateMax 算。streak<=1 时原样返回 d。
-// 左移位数受 softStreakShiftMax 限制，避免 streak 极大时移位溢出。
-// 调用方必须已持有 p.mu。
+// softDurationLocked экспоненциально раздувает базу d по числу последовательных мягких кулдаунов: d << (streak-1), потолок softRateMax.
+// Если softRateMax не внедрён (<=0), считаем по defaultSoftRateMax. При streak<=1 возвращаем d как есть.
+// Число бит сдвига ограничено softStreakShiftMax, чтобы огромный streak не переполнил сдвиг.
+// Вызывающий код уже должен держать p.mu.
 func (p *Pool) softDurationLocked(d time.Duration, streak int) time.Duration {
 	if streak <= 1 {
 		return d
@@ -130,15 +118,15 @@ func (p *Pool) softDurationLocked(d time.Duration, streak int) time.Duration {
 	if max <= 0 {
 		max = defaultSoftRateMax
 	}
-	if d > max || d <= 0 { // d<=0：左移溢出成负数/零，同样按封顶兜底
+	if d > max || d <= 0 { // d<=0: сдвиг переполнился в отрицательное/ноль — тоже страхуемся потолком
 		d = max
 	}
 	return d
 }
 
-// recordBreakerFailureLocked 累计一次熔断失败；达到阈值则按指数退避熔断。
-// 熔断与冷却（until）解耦：冷却按错误类别给固定时长，熔断则对"反复失败"逐次加长封禁。
-// 调用方必须已持有 p.mu。
+// recordBreakerFailureLocked копит одну ошибку прерывания; по порогу прерывает с экспоненциальным откатом.
+// Прерывание отвязано от кулдауна (until): кулдаун даёт фиксированную длительность по классу ошибки, прерывание за «повторяющиеся ошибки» раз за разом удлиняет бан.
+// Вызывающий код уже должен держать p.mu.
 func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.fails++
 	if e.fails < p.breakerThreshold {
@@ -152,24 +140,24 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 			break
 		}
 	}
-	// 触发熔断：重置失败计数供下一轮重新累计；retryCount 递增放大退避指数。
+	// Срабатывание прерывания: сбрасываем счёт ошибок для нового накопления в следующем круге; retryCount растёт и раздувает показатель отката.
 	e.fails = 0
 	e.retryCount++
 	e.breakerUntil = time.Now().Add(d)
 }
 
-// CooldownUntilTomorrow4AM 冷却到下一个 04:00（本地时区）。
-// 用于 ErrHardCredit 场景：积分耗尽账号等签到任务（09:00/21:00）恢复。
+// CooldownUntilTomorrow4AM охлаждает до ближайших 04:00 (местный часовой пояс).
+// Для сценария ErrHardCredit: аккаунт с исчерпанным балансом ждёт восстановления задачей чекина (09:00/21:00).
 func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
 	now := time.Now()
 	p.Cooldown(uid, CoolHard, nextDay4AM(now).Sub(now), reason)
 }
 
-// nextDay4AM 返回 now 之后最近的一个 04:00（与 now 同一时区）。
-// now 在当天 04:00 之前（凌晨 00:00~04:00）时返回当天 04:00——此时签到尚未执行，
-// 该窗内触发的硬冷却等当天签到即可恢复；返回次日会白冷约一天。
-// 04:00 整及之后返回次日 04:00。
-// time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），天然覆盖跨日/跨月/跨年。
+// nextDay4AM возвращает ближайшие 04:00 после now (тот же часовой пояс, что у now).
+// Если now раньше сегодняшних 04:00 (ночь 00:00~04:00) — возвращаем сегодняшние 04:00: чекин ещё не выполнялся,
+// жёсткий кулдаун в этом окне восстановится сегодняшним чекином; возврат завтрашнего дня заморозил бы впустую почти сутки.
+// Ровно в 04:00 и позже — возвращаем 04:00 следующего дня.
+// time.Date при переполнении дня сам переносится (конец месяца→1-е следующего, конец года→1-е следующего года), естественно покрывая сутки/месяц/год.
 func nextDay4AM(now time.Time) time.Time {
 	if now.Hour() < 4 {
 		return time.Date(now.Year(), now.Month(), now.Day(), 4, 0, 0, 0, now.Location())
@@ -177,15 +165,15 @@ func nextDay4AM(now time.Time) time.Time {
 	return time.Date(now.Year(), now.Month(), now.Day()+1, 4, 0, 0, 0, now.Location())
 }
 
-// Disable 永久禁用（session 死亡），需人工重登后手工恢复或文件替换。
+// Disable — вечное отключение (смерть сессии), восстанавливается вручную после ручного перелогина или заменой файла.
 func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
 	e.credits = credits
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
 	e.softStreak = 0
-	e.modelCooldowns = nil // 冷却域清零时一并清模型级独立冷却（模型豁免随之消失）
+	e.softRateModel = "" // при обнулении домена кулдауна заодно стираем след освобождения модели
 }
 
-// ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却（余额恢复）。
-// 注意：不碰熔断器——熔断到期（breakerUntil 过期）或下次 chat 成功（NoteSuccess）才恢复。
+// ReenableIfCredits — разморозка после чекина: только если remain > 0 и аккаунт не отключён, снимаем кулдаун (баланс восстановлен).
+// Внимание: прерыватель не трогаем — восстановление только по истечении прерывания (breakerUntil истёк) или при следующем успехе chat (NoteSuccess).

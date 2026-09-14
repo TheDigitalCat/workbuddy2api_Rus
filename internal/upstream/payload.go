@@ -1,6 +1,6 @@
-// payload.go 改写发往上游的 chat 请求体：
-//  1. 强制 stream:true（上游拒绝非流式）
-//  2. tool_choice 归一化（上游该字段是 string，对象形式会 400 code=11101）
+// payload.go переписывает исходящее chat-тело для апстрима:
+//  1. принудительно stream:true (апстрим отклоняет непотоковые)
+//  2. нормализация tool_choice (у апстрима это поле string, форма объекта даст 400 code=11101)
 package upstream
 
 import (
@@ -9,14 +9,14 @@ import (
 	"strings"
 )
 
-// PrepareBodyOpt 单 pass 改写；sanitize=false 时行为完全还原（仅强制 stream + 归一化 tool_choice）。
+// PrepareBodyOpt — переписывание за один проход; при sanitize=false поведение полностью как было (только принудительный stream + нормализация tool_choice).
 func PrepareBodyOpt(src []byte, sanitize bool) []byte {
 	return PrepareBodyOptWithEfforts(src, sanitize, nil)
 }
 
-// PrepareBodyOptWithEfforts 在 PrepareBodyOpt 基础上按模型 supportedEfforts 降级 reasoning_effort：
-// 仅当请求显式携带且模型不支持该档位时，改为 ≤请求档位的最高支持档；支持档全部高于请求档时取最低档；
-// 未知模型/未知档位/未携带该字段一律透传。efforts 为 nil 表示未知（不降级）。
+// PrepareBodyOptWithEfforts — поверх PrepareBodyOpt даунгрейдит reasoning_effort по supportedEfforts модели:
+// только если запрос явно несёт ступень, а модель её не поддерживает, — меняем на высшую поддерживаемую ≤ запрошенной; если все поддерживаемые выше запрошенной — берём низшую;
+// неизвестная модель/неизвестная ступень/поле не несёт — всегда пропускаем. efforts равен nil — неизвестно (без даунгрейда).
 func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]string) []byte {
 	if len(src) == 0 {
 		return src
@@ -28,13 +28,13 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	obj["stream"] = true
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
-	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
-	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
-	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
+	// Переключатель цепочки рассуждений DeepSeek (см. thinking.go): внедряем thinking.type=enabled + добиваем ступень по умолчанию при отсутствии.
+	// Выполняем раньше normalizeReasoningEffort: добитая ступень по умолчанию тоже идёт по существующему конвейеру даунгрейда,
+	// если модель ступень по умолчанию не поддерживает — автоматически падает на высшую поддерживаемую ≤ ступени по умолчанию (не шлём наружу несоответствующую ступень).
 	injectThinking(obj)
 	normalizeReasoningEffort(obj, efforts)
-	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
-	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
+	// Мног roundовая консистентность DeepSeek: если сообщения assistant несут следы reasoning — дописываем reasoning_content
+	// (requiresReasoningContentOnAssistantMessages, см. thinking.go).
 	backfillReasoningContent(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
@@ -48,14 +48,14 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	return out
 }
 
-// effortRank 档位从低到高。
+// effortRank — ступени от низкой к высокой.
 var effortRank = map[string]int{"off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6}
 
-// normalizeReasoningEffort 按模型 supportedEfforts 降级 reasoning_effort（snake/camel 双字段兼容）。
-//   - 请求档位模型支持 → 原样透传
-//   - 请求档位不支持 → 改为 ≤请求档位的最高支持档（降级）
-//   - 支持档全部高于请求档 → 取最低支持档（偏离最小）
-//   - 未知模型/未知档位/未携带字段/模型未缓存 → 一律透传
+// normalizeReasoningEffort даунгрейдит reasoning_effort по supportedEfforts модели (совместимость обоих полей snake/camel).
+//   - запрошенная ступень поддерживается моделью → пропускаем как есть
+//   - запрошенная ступень не поддерживается → меняем на высшую поддерживаемую ≤ запрошенной (даунгрейд)
+//   - все поддерживаемые выше запрошенной → берём низшую поддерживаемую (минимальное отклонение)
+//   - неизвестная модель/неизвестная ступень/поле не несёт/модель не в кэше → всегда пропускаем
 func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	if len(efforts) == 0 {
 		return
@@ -85,7 +85,7 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	if !known {
 		return
 	}
-	// 在 ≤请求档位的支持档里选最高档；命中且与请求不同才改写。
+	// Среди поддерживаемых ≤ запрошенной выбираем высшую; переписываем, только если попали и отличается от запрошенной.
 	best, bestIdx := "", -1
 	for _, s := range supported {
 		idx, k := effortRank[strings.TrimSpace(strings.ToLower(s))]
@@ -96,11 +96,11 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	if best != "" {
 		if !strings.EqualFold(best, reqStr) {
 			obj[key] = best
-			log.Printf("WARN: [upstream] reasoning_effort downgraded model=%s %s -> %s", model, reqStr, best)
+			log.Printf("WARN: [upstream] reasoning_effort понижен model=%s %s -> %s", model, reqStr, best)
 		}
 		return
 	}
-	// 支持档全部高于请求档：取最低支持档。
+	// Все поддерживаемые выше запрошенной: берём низшую поддерживаемую.
 	lowest, lowestIdx := "", 1<<30
 	for _, s := range supported {
 		idx, k := effortRank[strings.TrimSpace(strings.ToLower(s))]
@@ -110,21 +110,21 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	}
 	if lowest != "" {
 		obj[key] = lowest
-		log.Printf("WARN: [upstream] reasoning_effort floored model=%s %s -> %s", model, reqStr, lowest)
+		log.Printf("WARN: [upstream] reasoning_effort приведён к минимуму model=%s %s -> %s", model, reqStr, lowest)
 	}
 }
 
-// normalizeRoles 把 messages 里的 developer 角色归一为 system。
+// normalizeRoles приводит роль developer в messages к system.
 //
-// 背景：上游对 messages 的 role 字段做白名单校验，developer 不在白名单内，
-// 命中即 HTTP 400 code=11128。developer 是 OpenAI 新规范里 system 的别名
-// （Codex / Cursor 等新客户端用它承载 system 级指令），改写为 system 不丢语义。
+// Фон: апстрим проверяет поле role в messages по белому списку, developer в списке нет,
+// попадание — сразу HTTP 400 code=11128. developer — псевдоним system в новом стандарте OpenAI
+// (новые клиенты вроде Codex / Cursor несут им system-уровень инструкций), переписывание в system семантику не теряет.
 //
-// 此归一化是「协议兼容」（补上游 role 白名单），不是「内容脱敏」，
-// 因此有意与 SanitizeFingerprints / sanitize 参数解耦：即使 sanitize=false 也照常归一。
+// Эта нормализация — «совместимость протокола» (добивка белого списка role апстрима), а не «десенсибилизация содержимого»,
+// потому намеренно отвязана от SanitizeFingerprints / параметра sanitize: даже при sanitize=false приводим как обычно.
 //
-// 只认 developer 这一个值：其余 role（system/user/assistant/tool/任意未知值）一律原样保留，
-// 不合并、不重排、不删除任何消息（上游对多 system 的行为尚未实测，合并会引入新变量）。
+// Признаём только это одно значение developer: остальные role (system/user/assistant/tool/любое неизвестное) всегда сохраняем как есть,
+// не сливаем, не переупорядочиваем, не удаляем ни одного сообщения (поведение апстрима при нескольких system ещё не замерено, слияние внесло бы новую переменную).
 func normalizeRoles(obj map[string]any) {
 	msgs, ok := obj["messages"].([]any)
 	if !ok {
@@ -141,47 +141,17 @@ func normalizeRoles(obj map[string]any) {
 		}
 		if strings.EqualFold(strings.TrimSpace(role), "developer") {
 			msg["role"] = "system"
-			log.Printf("[upstream] role normalized developer->system idx=%d", i)
+			log.Printf("[upstream] роль нормализована developer->system idx=%d", i)
 		}
 	}
 }
 
-// ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45，防 console 域上游 code 11-128）：
-// 首条消息非 system 时在 messages 最前补一条 fallback system（"You are a helpful assistant."）。
-// 仅对 global 请求调用（CN 现状不动；即使首条就是 system 也不重复注入）。
-// body 不可解析时原样返回（与 prepareBody 语义一致：坏 body 不在这里二次错误化）。
-func ensureConsoleSystem(body []byte) []byte {
-	if len(body) == 0 {
-		return body
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body
-	}
-	msgs, ok := obj["messages"].([]any)
-	if !ok || len(msgs) == 0 {
-		return body
-	}
-	first, ok := msgs[0].(map[string]any)
-	if ok {
-		if role, _ := first["role"].(string); strings.EqualFold(strings.TrimSpace(role), "system") {
-			return body // 首条已是 system：不注入
-		}
-	}
-	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-// normalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice。
-//   - "none"            → 删 tool_choice + 删 tools/functions
-//   - {"type":"none"}   → 同上
-//   - {"type":"auto"/"required"} → 字符串 "auto"/"required"
-//   - {"type":"function","function":{"name":"x"}} → 字符串 "x"
-//   - 其他对象/非标量 → 删 tool_choice
+// normalizeToolChoice переписывает OpenAI tool_choice под Go-struct апстрима (тип string).
+//   - "none"            → удалить tool_choice + удалить tools/functions
+//   - {"type":"none"}   → то же
+//   - {"type":"auto"/"required"} → строка "auto"/"required"
+//   - {"type":"function","function":{"name":"x"}} → строка "x"
+//   - прочие объекты/нескаляры → удалить tool_choice
 func normalizeToolChoice(obj map[string]any) {
 	suppress := func() {
 		delete(obj, "tools")

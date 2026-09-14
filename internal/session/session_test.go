@@ -8,7 +8,7 @@ import (
 	"workbuddy2api/internal/redisstore"
 )
 
-// countingStore 记录镜像调用次数的假 Store（不联网）。
+// countingStore — фейковый Store, считающий зеркальные вызовы (без сети).
 type countingStore struct {
 	redisstore.Noop
 	mu       sync.Mutex
@@ -72,7 +72,7 @@ func TestTTLExpiryReassigns(t *testing.T) {
 	if !ok {
 		t.Fatal("resolve after expiry should still succeed")
 	}
-	// 过期后可重新分配（可能巧合同号，但至少返回有效账号）。
+	// После протухания можно перераспределить (может случайно совпасть номер, но вернётся хотя бы валидный).
 	_ = u1
 	_ = u2
 	if r.Count() != 1 {
@@ -86,7 +86,7 @@ func TestBoundAccountCooldownReassigns(t *testing.T) {
 	if u1 != "a1" {
 		t.Fatalf("initial bind=%s want a1", u1)
 	}
-	// a1 冷却 → 可用列表只剩 a2 → 重新分配必须换到 a2。
+	// a1 охлаждён → в списке доступных остался только a2 → перераспределение обязано уйти на a2.
 	r.cfg.Available = func() []string { return []string{"a2"} }
 	u2, ok := r.Resolve("c1")
 	if !ok {
@@ -101,7 +101,7 @@ func TestBoundAccountCooldownReassigns(t *testing.T) {
 }
 
 func TestNoSessionKeyPassthrough(t *testing.T) {
-	// ExtractKey 找不到任何会话键 → 空串（调用方据空串走普通 Pick；router 不会被调用）。
+	// ExtractKey не нашёл ни одного ключа сессии → пустая строка (вызывающий по пустой идёт обычным Pick; router не вызывается).
 	got := ExtractKey([]byte(`{"model":"x","messages":[]}`))
 	if got != "" {
 		t.Errorf("ExtractKey should return empty, got %q", got)
@@ -113,19 +113,19 @@ func TestExtractKeyPriority(t *testing.T) {
 		body string
 		want string
 	}{
-		{`{"metadata":{"conversation_id":"mc","user_id":"mu"},"conversation_id":"top"}`, "mc"}, // metadata.conversation_id 优先
-		{`{"conversation_id":"top"}`, "top"},                                                   // 顶层 conversation_id
-		{`{"metadata":{"user_id":"mu"}}`, "mu"},                                                // metadata.user_id 兜底
-		{`{"metadata":{"conversation_id":123}}`, ""},                                           // 非字符串 → 空
-		{`not-json`, ""}, // 非法 JSON → 空
-		// issue #35：客户端实际发 camelCase conversationId，ExtractKey 必须识别。
-		{`{"conversationId":"abc"}`, "abc"},                                            // 顶层 camelCase
+		{`{"metadata":{"conversation_id":"mc","user_id":"mu"},"conversation_id":"top"}`, "mc"}, // metadata.conversation_id приоритетнее
+		{`{"conversation_id":"top"}`, "top"},                                                   // верхний conversation_id
+		{`{"metadata":{"user_id":"mu"}}`, "mu"},                                                // metadata.user_id как запасной
+		{`{"metadata":{"conversation_id":123}}`, ""},                                           // не строка → пусто
+		{`not-json`, ""}, // битый JSON → пусто
+		// issue #35: клиент реально шлёт camelCase conversationId, ExtractKey обязан распознавать.
+		{`{"conversationId":"abc"}`, "abc"},                                            // верхний camelCase
 		{`{"metadata":{"conversationId":"abc"}}`, "abc"},                               // metadata.camelCase
-		{`{"metadata":{"conversation_id":"snake","conversationId":"camel"}}`, "snake"}, // snake 优先于 camel
-		{`{"conversation_id":"snake","conversationId":"camel"}`, "snake"},              // 顶层 snake 优先于 camel
-		{`{"conversationId":123}`, ""},                                                 // 数字 conversationId → 空
-		{`{"metadata":{"conversationId":456}}`, ""},                                    // metadata 数字 conversationId → 空
-		{`{"metadata":{"conversationId":"abc","user_id":"mu"}}`, "abc"},                // camel conversationId 优先于 user_id
+		{`{"metadata":{"conversation_id":"snake","conversationId":"camel"}}`, "snake"}, // snake приоритетнее camel
+		{`{"conversation_id":"snake","conversationId":"camel"}`, "snake"},              // верхний snake приоритетнее camel
+		{`{"conversationId":123}`, ""},                                                 // числовой conversationId → пусто
+		{`{"metadata":{"conversationId":456}}`, ""},                                    // metadata числовой conversationId → пусто
+		{`{"metadata":{"conversationId":"abc","user_id":"mu"}}`, "abc"},                // camel conversationId приоритетнее user_id
 	}
 	for _, c := range cases {
 		if got := ExtractKey([]byte(c.body)); got != c.want {
@@ -153,7 +153,7 @@ func TestConcurrentSameKeyAssignsOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	// 所有 goroutine 必须拿到同一个账号（写锁 re-check 防重复分配）。
+	// Все goroutine обязаны получить один номер (re-check под write-lock против двойной раздачи).
 	first := ""
 	for _, u := range uids {
 		if u == "" {
@@ -171,7 +171,7 @@ func TestConcurrentSameKeyAssignsOnce(t *testing.T) {
 	}
 }
 
-// boundUID 直接读绑定 uid（不触发 Resolve 的重分配），供 Bind 系列测试断言用（包内私有 helper）。
+// boundUID прямо читает привязанный uid (без перераспределения Resolve), для assert'ов серии Bind (внутрипакетный приватный helper).
 func (r *Router) boundUID(key string) (string, bool) {
 	r.mu.RLock()
 	e, ok := r.entries[key]
@@ -180,14 +180,14 @@ func (r *Router) boundUID(key string) (string, bool) {
 }
 
 func TestBindOverridesAndMirrors(t *testing.T) {
-	// Bind 幂等覆盖旧值，并异步镜像 SetBind。
+	// Bind идемпотентно перекрывает старое значение и асинхронно зеркалит SetBind.
 	st := newCountingStore()
 	r := routerWith(st, []string{"a1", "a2"}, time.Minute)
 	r.Bind("c1", "a1")
 	if u, ok := r.boundUID("c1"); !ok || u != "a1" {
 		t.Fatalf("bind c1->a1 then bound=%s ok=%v", u, ok)
 	}
-	// 覆盖到 a2
+	// Перекрываем на a2
 	r.Bind("c1", "a2")
 	if u, _ := r.boundUID("c1"); u != "a2" {
 		t.Fatalf("bind override should map c1->a2, got %s", u)
@@ -248,7 +248,7 @@ func TestRedisMirrorSetBindCount(t *testing.T) {
 	st := newCountingStore()
 	r := routerWith(st, []string{"a1", "a2"}, time.Minute)
 	r.Resolve("c1")
-	r.Resolve("c1") // 快路径 touch → 又镜像一次
+	r.Resolve("c1") // быстрый путь touch → ещё одно зеркалирование
 	if st.setBinds < 1 {
 		t.Errorf("SetBind mirror count=%d want >=1", st.setBinds)
 	}

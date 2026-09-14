@@ -16,11 +16,11 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// travelStub 模拟 growth 域全部端点，记录调用次数与请求参数。
+// travelStub имитирует все эндпоинты growth-домена, считает вызовы и параметры запросов.
 type travelStub struct {
-	buddy       string // /buddy/info 的 data.buddy 原文（"null" 或对象）
-	state       string // /travel/status 的 data 原文
-	firstStatus int    // /buddy/first 的 HTTP 状态码（非 0 时按业务错误返回）
+	buddy       string // сырой data.buddy ответа /buddy/info («null» или объект)
+	state       string // сырой data ответа /travel/status
+	firstStatus int    // HTTP-статус /buddy/first (ненулевой — возвращаем как бизнес-ошибку)
 
 	infoCalls, statusCalls, departCalls atomic.Int32
 	claimCalls, firstCalls, agreeCalls  atomic.Int32
@@ -59,7 +59,7 @@ func (s *travelStub) handler() http.Handler {
 				w.Write([]byte(`{"code":400,"msg":"first_buddy task not completed yet"}`))
 				return
 			}
-			w.Write([]byte(`{"code":0,"msg":"ok","data":{"buddy":{"id":1,"name":"档案喵"}}}`))
+			w.Write([]byte(`{"code":0,"msg":"ok","data":{"buddy":{"id":1,"name":"档案喵"}}}`)) // данные: имя питомца-фикстуры (значение name), не переводим
 		case "/activity/growth/buddy/agreement":
 			s.agreeCalls.Add(1)
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{"agreed":true}}`))
@@ -73,8 +73,8 @@ func (s *travelStub) server() *httptest.Server {
 	return httptest.NewServer(s.handler())
 }
 
-// billingAndGrowthServer 同时模拟 billing（签到/余额/刷新）与 growth（旅行）端点，
-// 供「签到收尾顺带跑旅行」这类跨域用例使用。
+// billingAndGrowthServer одновременно имитирует эндпоинты billing (подписание/баланс/обновление) и growth (путешествия),
+// для междоменных кейсов вида «хвост подписания тянет путешествия».
 func billingAndGrowthServer(stub *travelStub) *httptest.Server {
 	growth := stub.handler()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +91,7 @@ func billingAndGrowthServer(stub *travelStub) *httptest.Server {
 	}))
 }
 
-// fastTravel 关闭账号间限速，避免测试白等 800ms。
+// fastTravel глушит межномерной лимит, чтобы тесты не ждали вхолостую 800ms.
 func fastTravel(t *testing.T) {
 	t.Helper()
 	old := travelAccountDelay
@@ -99,7 +99,7 @@ func fastTravel(t *testing.T) {
 	t.Cleanup(func() { travelAccountDelay = old })
 }
 
-// newTravelScheduler 构造 travel 相关依赖齐全的调度器。
+// newTravelScheduler собирает планировщик со всеми travel-зависимостями.
 func newTravelScheduler(t *testing.T, srv *httptest.Server, uids ...string) (*Scheduler, *pool.Pool) {
 	t.Helper()
 	p := pool.New("")
@@ -110,8 +110,8 @@ func newTravelScheduler(t *testing.T, srv *httptest.Server, uids ...string) (*Sc
 	return New(Config{Pool: p, Upstream: up, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}}), p
 }
 
-// TestRunCheckinNowNoLongerTriggersTravel 签到收尾不再跑旅行（旅行已剥离为独立排程）。
-// 旅行由独立时点（travel_hours）触发，与签到解耦。
+// TestRunCheckinNowNoLongerTriggersTravel: хвост подписания путешествия больше не гоняет (путешествия выделены в независимый план).
+// Путешествия триггерит независимая точка (travel_hours), от подписания отвязаны.
 func TestRunCheckinNowNoLongerTriggersTravel(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}
@@ -121,13 +121,13 @@ func TestRunCheckinNowNoLongerTriggersTravel(t *testing.T) {
 	s, _ := newTravelScheduler(t, srv, "u1")
 	s.RunCheckinNow()
 
-	// 签到不再顺带跑旅行：buddy/info 不应被调用。
+	// Подписание больше не тянет путешествия: buddy/info не должен вызываться.
 	if n := stub.infoCalls.Load(); n != 0 {
-		t.Errorf("buddy/info calls=%d want 0（旅行已从签到剥离）", n)
+		t.Errorf("buddy/info calls=%d want 0 (путешествия отделены от подписания)", n)
 	}
 }
 
-// TestRunTravelNowAdoptsOnNoBuddy 旅行独立排程：无猫 → 同意协议 + 领养。
+// TestRunTravelNowAdoptsOnNoBuddy: независимый план путешествий — нет питомца — согласие с соглашением + взятие.
 func TestRunTravelNowAdoptsOnNoBuddy(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}
@@ -141,17 +141,17 @@ func TestRunTravelNowAdoptsOnNoBuddy(t *testing.T) {
 		t.Errorf("buddy/info calls=%d want 1", n)
 	}
 	if n := stub.firstCalls.Load(); n != 1 {
-		t.Errorf("buddy/first calls=%d want 1（无猫应尝试领养）", n)
+		t.Errorf("buddy/first calls=%d want 1 (без питомца должны пробовать взять)", n)
 	}
 	if n := stub.agreeCalls.Load(); n != 1 {
 		t.Errorf("buddy/agreement calls=%d want 1", n)
 	}
 }
 
-// TestRunTravelCoversIdleAccount 旅行独立排程覆盖空闲账号并派出。
+// TestRunTravelCoversIdleAccount: независимый план путешествий покрывает свободный номер и отправляет.
 func TestRunTravelCoversIdleAccount(t *testing.T) {
 	fastTravel(t)
-	stub := &travelStub{buddy: `{"id":7,"name":"档案喵"}`,
+	stub := &travelStub{buddy: `{"id":7,"name":"档案喵"}`, // данные: имя питомца-фикстуры (значение name), не переводим
 		state: `{"state":"idle","daily_limit_reached":false}`}
 	srv := stub.server()
 	defer srv.Close()
@@ -160,13 +160,13 @@ func TestRunTravelCoversIdleAccount(t *testing.T) {
 
 	s.RunTravelNow()
 
-	// 有猫 + idle + 未达上限 → 派出。
+	// Есть питомец + idle + лимит не исчерпан — отправляем.
 	if n := stub.departCalls.Load(); n != 1 {
 		t.Errorf("depart calls=%d want 1", n)
 	}
 }
 
-// TestRunKeepaliveDoesNotTriggerTravel 22 点保活不触发旅行：旅行独立排程。
+// TestRunKeepaliveDoesNotTriggerTravel: keepalive в 22:00 путешествия не триггерит — у путешествий независимый план.
 func TestRunKeepaliveDoesNotTriggerTravel(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}
@@ -177,16 +177,16 @@ func TestRunKeepaliveDoesNotTriggerTravel(t *testing.T) {
 	s.RunKeepaliveNow()
 
 	if n := stub.infoCalls.Load(); n != 0 {
-		t.Errorf("buddy/info calls=%d want 0（保活不触发旅行）", n)
+		t.Errorf("buddy/info calls=%d want 0 (keepalive путешествия не триггерит)", n)
 	}
 	if n := stub.firstCalls.Load(); n != 0 {
 		t.Errorf("buddy/first calls=%d want 0", n)
 	}
 }
 
-// TestRunTravelStateMachine 表驱动覆盖状态机全部分支：每趟只做一个动作。
+// TestRunTravelStateMachine: таблицей покрываем все ветки автомата — за рейс ровно одно действие.
 func TestRunTravelStateMachine(t *testing.T) {
-	const buddyPresent = `{"id":7,"name":"档案喵 R"}`
+	const buddyPresent = `{"id":7,"name":"档案喵 R"}` // данные: имя питомца-фикстуры (значение name), не переводим
 
 	cases := []struct {
 		name         string
@@ -203,40 +203,40 @@ func TestRunTravelStateMachine(t *testing.T) {
 		wantRecord   int64
 	}{
 		{
-			name: "无猫-领养成功", buddy: "null",
+			name: "нет питомца — взятие успешно", buddy: "null",
 			wantInfo: 1, wantFirst: 1, wantAgree: 1,
 		},
 		{
-			name: "无猫-门槛未达-静默跳过", buddy: "null", firstStatus: 400,
+			name: "нет питомца — порог не взят — молча пропускаем", buddy: "null", firstStatus: 400,
 			wantInfo: 1, wantFirst: 1, wantAgree: 1,
 		},
 		{
-			name: "有猫-idle-未达上限-派出", buddy: buddyPresent,
+			name: "есть питомец — idle — лимит не исчерпан — отправляем", buddy: buddyPresent,
 			state:    `{"state":"idle","daily_limit_reached":false}`,
 			wantInfo: 1, wantStatus: 1, wantDepart: 1, wantLocation: 4,
 		},
 		{
-			name: "有猫-idle-已达上限-跳过", buddy: buddyPresent,
+			name: "есть питомец — idle — лимит исчерпан — пропускаем", buddy: buddyPresent,
 			state:    `{"state":"idle","daily_limit_reached":true}`,
 			wantInfo: 1, wantStatus: 1,
 		},
 		{
-			name: "有猫-traveling-跳过", buddy: buddyPresent,
+			name: "есть питомец — traveling — пропускаем", buddy: buddyPresent,
 			state:    `{"state":"traveling","record_id":42}`,
 			wantInfo: 1, wantStatus: 1,
 		},
 		{
-			name: "有猫-arrived-领奖", buddy: buddyPresent,
+			name: "есть питомец — arrived — забираем награду", buddy: buddyPresent,
 			state:    `{"state":"arrived","record_id":42,"reward_credit":9}`,
 			wantInfo: 1, wantStatus: 1, wantClaim: 1, wantRecord: 42,
 		},
 		{
-			name: "有猫-arrived-缺record_id-跳过领奖", buddy: buddyPresent,
+			name: "есть питомец — arrived — нет record_id — пропускаем награду", buddy: buddyPresent,
 			state:    `{"state":"arrived","record_id":0}`,
 			wantInfo: 1, wantStatus: 1,
 		},
 		{
-			name: "有猫-未知状态-跳过", buddy: buddyPresent,
+			name: "есть питомец — неизвестный статус — пропускаем", buddy: buddyPresent,
 			state:    `{"state":"teleporting"}`,
 			wantInfo: 1, wantStatus: 1,
 		},
@@ -277,7 +277,7 @@ func TestRunTravelStateMachine(t *testing.T) {
 	}
 }
 
-// TestRunTravelAdoptThresholdTriedOncePerDay 门槛未达（400）当日只试一次，后续巡检静默跳过。
+// TestRunTravelAdoptThresholdTriedOncePerDay: порог не взят (400) — в этот день пробуем лишь раз, дальше обходы молча пропускаем.
 func TestRunTravelAdoptThresholdTriedOncePerDay(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null", firstStatus: 400}
@@ -290,17 +290,17 @@ func TestRunTravelAdoptThresholdTriedOncePerDay(t *testing.T) {
 	s.RunTravelNow()
 
 	if n := stub.firstCalls.Load(); n != 1 {
-		t.Errorf("first calls=%d want 1（当日只试一次）", n)
+		t.Errorf("first calls=%d want 1 (в этот день пробуем лишь раз)", n)
 	}
 	if n := stub.agreeCalls.Load(); n != 1 {
 		t.Errorf("agreement calls=%d want 1", n)
 	}
 	if n := stub.infoCalls.Load(); n != 3 {
-		t.Errorf("info calls=%d want 3（仍每趟查有无猫）", n)
+		t.Errorf("info calls=%d want 3 (наличие питомца проверяем каждый рейс)", n)
 	}
 }
 
-// TestRunTravelAdoptTriedExpiresNextDay 跨自然日后允许重新尝试领养。
+// TestRunTravelAdoptTriedExpiresNextDay: после смены календарного дня повторное взятие разрешаем.
 func TestRunTravelAdoptTriedExpiresNextDay(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null", firstStatus: 400}
@@ -308,20 +308,20 @@ func TestRunTravelAdoptTriedExpiresNextDay(t *testing.T) {
 	defer srv.Close()
 
 	s, _ := newTravelScheduler(t, srv, "u1")
-	s.markAdoptTried("u1") // 当日已试过
+	s.markAdoptTried("u1") // сегодня уже пробовали
 	s.RunTravelNow()
 	if n := stub.firstCalls.Load(); n != 0 {
-		t.Fatalf("first calls=%d want 0（当日已试过）", n)
+		t.Fatalf("first calls=%d want 0 (сегодня уже пробовали)", n)
 	}
 
-	s.adoptTried["u1"] = "2000-01-01" // 模拟昨日记录
+	s.adoptTried["u1"] = "2000-01-01" // имитируем вчерашнюю запись
 	s.RunTravelNow()
 	if n := stub.firstCalls.Load(); n != 1 {
-		t.Errorf("first calls=%d want 1（跨日应重试）", n)
+		t.Errorf("first calls=%d want 1 (после смены дня должны повторить)", n)
 	}
 }
 
-// TestRunTravelSkipsDisabledAndFailedAccounts 禁用账号不查；单账号出错不影响后续账号。
+// TestRunTravelSkipsDisabledAndFailedAccounts: отключённые номера не проверяем; ошибка одного номера не влияет на остальные.
 func TestRunTravelSkipsDisabledAndFailedAccounts(t *testing.T) {
 	fastTravel(t)
 	var deadCalls, okDepart, disabledCalls atomic.Int32
@@ -353,25 +353,25 @@ func TestRunTravelSkipsDisabledAndFailedAccounts(t *testing.T) {
 	s.RunTravelNow()
 
 	if n := deadCalls.Load(); n != 1 {
-		t.Errorf("dead account calls=%d want 1（401 跳过本轮，不强刷 token）", n)
+		t.Errorf("dead account calls=%d want 1 (401 пропускает этот круг, token насильно не обновляем)", n)
 	}
 	if n := disabledCalls.Load(); n != 0 {
 		t.Errorf("disabled account calls=%d want 0", n)
 	}
-	// 前列账号失败不应中断遍历：末位 ok 账号照常完成派出。
+	// Провал раннего номера не должен прерывать обход: последний ok-номер как был завершает отправку.
 	if n := okDepart.Load(); n != 1 {
-		t.Errorf("ok account depart calls=%d want 1（失败账号不影响后续遍历）", n)
+		t.Errorf("ok account depart calls=%d want 1 (провальный номер не влияет на обход остальных)", n)
 	}
 	st, ok := p.Status("ok")
 	if !ok {
-		t.Fatal("ok 账号应在池中")
+		t.Fatal("ok-номер должен быть в пуле")
 	}
 	if st.Disabled {
-		t.Errorf("ok 账号不应被影响: %+v", st)
+		t.Errorf("ok-номер не должен пострадать: %+v", st)
 	}
 }
 
-// TestRunTravelDisabledAccountSkipsAllCalls 禁用账号一个请求都不发。
+// TestRunTravelDisabledAccountSkipsAllCalls: отключённый номер не шлёт ни одного запроса.
 func TestRunTravelDisabledAccountSkipsAllCalls(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}
@@ -383,11 +383,11 @@ func TestRunTravelDisabledAccountSkipsAllCalls(t *testing.T) {
 	s.RunTravelNow()
 
 	if n := stub.infoCalls.Load(); n != 0 {
-		t.Errorf("info calls=%d want 0（禁用账号应跳过）", n)
+		t.Errorf("info calls=%d want 0 (отключённый номер пропускаем)", n)
 	}
 }
 
-// TestRunTravelActionErrorsDoNotAbort 各环节上游报错只影响本账号本轮：不 panic、不中断遍历。
+// TestRunTravelActionErrorsDoNotAbort: ошибка апстрима на любом шаге влияет только на этот номер в этом круге: без panic, обход не прерываем.
 func TestRunTravelActionErrorsDoNotAbort(t *testing.T) {
 	fastTravel(t)
 	var okDepart atomic.Int32
@@ -398,17 +398,17 @@ func TestRunTravelActionErrorsDoNotAbort(t *testing.T) {
 			w.Write([]byte(`{"code":500,"msg":"boom"}`))
 		}
 		switch {
-		case uid == "bdinfo": // 查有无猫失败
+		case uid == "bdinfo": // проверка наличия питомца провалилась
 			fail()
-		case uid == "status" && r.URL.Path == "/activity/growth/buddy/travel/status": // 查状态失败
+		case uid == "status" && r.URL.Path == "/activity/growth/buddy/travel/status": // проверка статуса провалилась
 			fail()
-		case uid == "depart" && r.URL.Path == "/activity/growth/buddy/travel/depart": // 派出发失败
+		case uid == "depart" && r.URL.Path == "/activity/growth/buddy/travel/depart": // отправка провалилась
 			fail()
-		case uid == "claim" && r.URL.Path == "/activity/growth/buddy/travel/claim": // 领奖失败
+		case uid == "claim" && r.URL.Path == "/activity/growth/buddy/travel/claim": // получение награды провалилось
 			fail()
-		case uid == "agree" && r.URL.Path == "/activity/growth/buddy/agreement": // 同意协议失败
+		case uid == "agree" && r.URL.Path == "/activity/growth/buddy/agreement": // согласие с соглашением провалилось
 			fail()
-		case uid == "first" && r.URL.Path == "/activity/growth/buddy/first": // 领养非门槛类失败
+		case uid == "first" && r.URL.Path == "/activity/growth/buddy/first": // взятие провалилось не по порогу
 			fail()
 		case r.URL.Path == "/activity/growth/buddy/info":
 			if uid == "claim" {
@@ -438,15 +438,15 @@ func TestRunTravelActionErrorsDoNotAbort(t *testing.T) {
 	defer srv.Close()
 
 	s, _ := newTravelScheduler(t, srv, "agree", "bdinfo", "claim", "depart", "first", "ok", "status")
-	s.RunTravelNow() // 不应 panic
+	s.RunTravelNow() // не должен паниковать
 
-	// 末位账号（uid 排序后 ok 排在 status 前，但都在失败账号之后）照常完成派出。
+	// Последний номер (после сортировки uid ok идёт перед status, но оба после провальных) как был завершает отправку.
 	if n := okDepart.Load(); n == 0 {
-		t.Errorf("depart calls=%d want >0（个别账号失败不应中断遍历）", n)
+		t.Errorf("depart calls=%d want >0 (провал отдельных номеров не должен прерывать обход)", n)
 	}
 }
 
-// TestRunTravelLoopCancelsWhenDisabled 无任何整点任务时 Run 不空转，ctx 取消即返回。
+// TestRunTravelLoopCancelsWhenDisabled: без целочасовых задач Run не крутится вхолостую, по отмене ctx возвращаемся.
 func TestRunTravelLoopCancelsWhenDisabled(t *testing.T) {
 	s := &Scheduler{cfg: Config{}, adoptTried: map[string]string{}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -456,35 +456,35 @@ func TestRunTravelLoopCancelsWhenDisabled(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run 未在 ctx 取消后返回")
+		t.Fatal("Run не вернулся после отмены ctx")
 	}
 }
 
-// TestRunTravelLoopStopsOnCancel 有排程在等计时器时 ctx 取消应立即退出。
+// TestRunTravelLoopStopsOnCancel: когда план ждёт таймер, отмена ctx должна выйти сразу.
 func TestRunTravelLoopStopsOnCancel(t *testing.T) {
 	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22}})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { s.Run(ctx); close(done) }()
-	time.Sleep(20 * time.Millisecond) // 让 Run 进入 select 等待
+	time.Sleep(20 * time.Millisecond) // даём Run уйти в select-ожидание
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run 未在 ctx 取消后返回")
+		t.Fatal("Run не вернулся после отмены ctx")
 	}
 }
 
-// TestTravelDayAlignsCST 每日重置按 CST 自然日判定（UTC 17:00 已是次日 CST）。
+// TestTravelDayAlignsCST: дневной сброс считаем по календарному дню CST (UTC 17:00 — это уже следующие сутки CST).
 func TestTravelDayAlignsCST(t *testing.T) {
 	cases := []struct {
 		name string
 		in   time.Time
 		want string
 	}{
-		{"UTC 凌晨 = CST 当日", time.Date(2026, 9, 11, 2, 0, 0, 0, time.UTC), "2026-09-11"},
-		{"UTC 16:00 = CST 次日 00:00", time.Date(2026, 9, 11, 16, 0, 0, 0, time.UTC), "2026-09-12"},
-		{"UTC 15:59 仍在 CST 当日", time.Date(2026, 9, 11, 15, 59, 0, 0, time.UTC), "2026-09-11"},
+		{"UTC глубокая ночь = тот же день CST", time.Date(2026, 9, 11, 2, 0, 0, 0, time.UTC), "2026-09-11"},
+		{"UTC 16:00 = следующие сутки CST 00:00", time.Date(2026, 9, 11, 16, 0, 0, 0, time.UTC), "2026-09-12"},
+		{"UTC 15:59 всё ещё тот же день CST", time.Date(2026, 9, 11, 15, 59, 0, 0, time.UTC), "2026-09-11"},
 	}
 	for _, c := range cases {
 		if got := travelDay(c.in); got != c.want {

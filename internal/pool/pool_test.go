@@ -13,7 +13,7 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// withNoPickGap 临时关闭防并发撞号窗口（minPickGap=0），让纯加权分布测试不受影响。
+// withNoPickGap временно закрывает окно защиты от конкурентных столкновений (minPickGap=0), чтобы тесты чистого взвешенного распределения не страдали.
 func withNoPickGap(t *testing.T) {
 	t.Helper()
 	old := minPickGap
@@ -23,8 +23,8 @@ func withNoPickGap(t *testing.T) {
 
 func TestPickHighestCredits(t *testing.T) {
 	withNoPickGap(t)
-	// 三因子加权（credits 比例×10 + 闲置 + 成功率）：积分悬殊时高积分账号应被多数选中，
-	// 但不再像纯 credits 加权那样接近 99%（闲置补偿 + 成功率中性 1.5 拉平了基线）。
+	// Трёхфакторное взвешивание (доля credits×10 + простой + успешность): при большой разнице балансов аккаунт с высоким балансом должен выбираться большинством,
+	// но уже не под 99% как при чистом взвешивании credits (компенсация простоя + нейтральная успешность 1.5 выравнивают базу).
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
 	a2 := &auth.Auth{UID: "u2"}
@@ -73,7 +73,7 @@ func TestPickExpiredCooldownReturnsToHealthy(t *testing.T) {
 }
 
 func TestPickNilWhenAllDisabled(t *testing.T) {
-	// 全禁用 → 兜底不参与（禁用账号永不参与兜底）→ 返回 nil。
+	// Все отключены → фолбэк не участвует (отключённые аккаунты в фолбэке не участвуют никогда) → возвращаем nil.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Disable("u1", "session dead")
@@ -101,7 +101,7 @@ func TestPickExcluding(t *testing.T) {
 
 func TestPickExcludingStaysWithinHealthy(t *testing.T) {
 	withNoPickGap(t)
-	// 加权随机不能选出冷却/禁用账号。
+	// Взвешенный случайный не должен выбирать охлаждаемые/отключённые аккаунты.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u-cold"})
 	p.Add(&auth.Auth{UID: "u-hot"})
@@ -118,7 +118,7 @@ func TestPickExcludingStaysWithinHealthy(t *testing.T) {
 
 func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
 	withNoPickGap(t)
-	// Top5 三因子加权：单账号 credits 占比足够高时，多数挑中它。
+	// Трёхфакторное взвешивание Топ5: когда доля credits одного аккаунта достаточно высока, выбираем его большинством.
 	p := New("")
 	for _, u := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
 		p.Add(&auth.Auth{UID: u})
@@ -142,7 +142,7 @@ func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
 
 func TestPickWeightedUniformWhenAllZero(t *testing.T) {
 	withNoPickGap(t)
-	// credits 全为 0 → 退化为均匀随机，不能只挑固定一个。
+	// credits все 0 → деградация к равномерному случайному, нельзя выбирать вечно один фиксированный.
 	p := New("")
 	for _, u := range []string{"z1", "z2", "z3"} {
 		p.Add(&auth.Auth{UID: u})
@@ -158,7 +158,7 @@ func TestPickWeightedUniformWhenAllZero(t *testing.T) {
 
 func TestPickWeightedTopFiveOnly(t *testing.T) {
 	withNoPickGap(t)
-	// 第 6 高 credits 的账号在 Top5 之外，权重抽签永远轮不到它。
+	// Аккаунт с 6-м по величине credits — вне Топ5, взвешенная жеребьёвка до него никогда не доходит.
 	p := New("")
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5", "a6"} {
 		p.Add(&auth.Auth{UID: u})
@@ -168,7 +168,7 @@ func TestPickWeightedTopFiveOnly(t *testing.T) {
 	p.SetCredits("a3", 1000)
 	p.SetCredits("a4", 1000)
 	p.SetCredits("a5", 1000)
-	p.SetCredits("a6", 5) // Top5 之外
+	p.SetCredits("a6", 5) // вне Топ5
 	for i := 0; i < 2000; i++ {
 		if got := p.Pick(); got == nil || got.UID == "a6" {
 			t.Fatalf("iter %d: picked %+v, a6 must stay outside top-5", i, got)
@@ -178,23 +178,23 @@ func TestPickWeightedTopFiveOnly(t *testing.T) {
 
 func TestPickTopFiveBySuccessRateNotCredits(t *testing.T) {
 	withNoPickGap(t)
-	// C1 回归：top5 短名单必须按三因子权重（含成功率）而非纯 credits 截断。
-	// a1..a5 credits=100 但成功率极低（1/100），a6 credits=90 但成功率 100%。
-	// 纯 credits 排序时 a6（90 < 100）是第 6 名，永远进不了 top5；
-	// 三因子权重下 a6 权重最高，首轮必被选中。仅断言首轮（后续 a6 闲置补偿衰减会合法发散）。
+	// Регрессия C1: короткий список top5 должен усекаться по трёхфакторному весу (включая успешность), а не по чистым credits.
+	// a1..a5 credits=100, но успешность крайне низкая (1/100), а у a6 credits=90, но успешность 100%.
+	// При чистой сортировке по credits a6 (90 < 100) — 6-й, в top5 не попадает никогда;
+	// При трёхфакторном весе у a6 вес наибольший, в первом круге выбирается обязательно. Проверяем только первый круг (дальше компенсация простоя a6 затухает и законно расходится).
 	p := New("")
-	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 选权重最高的候选
+	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → выбираем кандидата с наибольшим весом
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5"} {
 		p.Add(&auth.Auth{UID: u})
 		p.SetCredits(u, 100)
 		for i := 0; i < 99; i++ {
-			p.NoteError(u) // 成功率 1/(1+99)≈0.03
+			p.NoteError(u) // успешность 1/(1+99)≈0.03
 		}
 		p.NoteSuccess(u)
 	}
 	p.Add(&auth.Auth{UID: "a6"})
 	p.SetCredits("a6", 90)
-	p.NoteSuccess("a6") // 成功率 100%
+	p.NoteSuccess("a6") // успешность 100%
 
 	if got := p.Pick(); got == nil || got.UID != "a6" {
 		t.Fatalf("pick=%v, want a6 (high-success low-credit must enter top5 by weight)", got)
@@ -203,9 +203,9 @@ func TestPickTopFiveBySuccessRateNotCredits(t *testing.T) {
 
 func TestPickTopFiveByIdleNotCredits(t *testing.T) {
 	withNoPickGap(t)
-	// C1 回归：闲置补偿同样影响短名单。a1..a5 credits=100 但刚被用过（闲置 0），
-	// a6 credits=90 但从未使用（闲置满分）。纯 credits 排序时 a6 进不了 top5；
-	// 三因子权重下 a6 权重最高，首轮必被选中。仅断言首轮。
+	// Регрессия C1: компенсация простоя так же влияет на короткий список. a1..a5 credits=100, но только что использованы (простой 0),
+	// а a6 credits=90, но ни разу не использован (максимум простоя). При чистой сортировке по credits a6 в top5 не входит;
+	// при трёхфакторном весе у a6 вес наибольший, в первом круге выбирается обязательно. Проверяем только первый круг.
 	p := New("")
 	now := time.Now()
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5"} {
@@ -215,7 +215,7 @@ func TestPickTopFiveByIdleNotCredits(t *testing.T) {
 	p.Add(&auth.Auth{UID: "a6"})
 	p.SetCredits("a6", 90)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
-	// a1..a5 全部"刚被用过"，闲置补偿归零；a6 从未使用 → 闲置满分。
+	// a1..a5 все «только что использованы», компенсация простоя обнулена; a6 ни разу не использован → максимум простоя.
 	p.mu.Lock()
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5"} {
 		p.byUID[u].lastUsed = now
@@ -235,7 +235,7 @@ func TestPickDeterministicViaSetRandomSource(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u2"})
 	p.SetCredits("u1", 100)
 	p.SetCredits("u2", 50)
-	// r=0 ∈ [0,50) → 命中 u1。注入源应使选号完全确定。
+	// r=0 ∈ [0,50) → попадание в u1. Инъецированный источник должен делать выбор номера полностью детерминированным.
 	for i := 0; i < 50; i++ {
 		if got := p.Pick(); got == nil || got.UID != "u1" {
 			t.Fatalf("iter %d: pick=%+v want u1 (deterministic)", i, got)
@@ -244,13 +244,13 @@ func TestPickDeterministicViaSetRandomSource(t *testing.T) {
 }
 
 func TestPickAntiThunderingHerd(t *testing.T) {
-	// 100 goroutine 同时 Pick：防并发撞号窗口内同一账号不应被重复选中。
-	// credits 相同 → 无注入源时加权随机应天然打散；为保证稳定，全部置 0 走均匀随机。
+	// 100 goroutine одновременно Pick: внутри окна защиты от конкурентных столкновений один аккаунт повторно выбираться не должен.
+	// credits одинаковы → без инъецированного источника взвешенный случайный должен естественно расходиться; для стабильности всё ставим в 0 и идём равномерным случайным.
 	p := New("")
 	for i := 0; i < 10; i++ {
 		p.Add(&auth.Auth{UID: fmt.Sprintf("c%02d", i)})
 	}
-	// 关键：验证并发中任意瞬间不会全选同一账号。
+	// Ключевое: проверяем, что в конкурентности ни в один момент не выбирается вечно один аккаунт.
 	const N = 100
 	var wg sync.WaitGroup
 	picked := make([]string, N)
@@ -271,7 +271,7 @@ func TestPickAntiThunderingHerd(t *testing.T) {
 			counts[uid]++
 		}
 	}
-	// 选号必须覆盖多个账号，且最热门的账号不超过一半。
+	// Выбор должен покрывать несколько аккаунтов, и самый горячий аккаунт — не более половины.
 	if len(counts) < 2 {
 		t.Fatalf("anti-thundering-herd failed: all %d picks hit %d account(s) %v", N, len(counts), counts)
 	}
@@ -283,20 +283,20 @@ func TestPickAntiThunderingHerd(t *testing.T) {
 }
 
 func TestPickLRUFallbackWhenTopAllRecentlyUsed(t *testing.T) {
-	// top5 全部刚被选中 → LRU 兜底应挑最近最少使用的那个（= 最早 lastUsed）。
+	// Весь top5 только что выбран → LRU-фолбэк должен взять давно не использовавшийся (= самый ранний lastUsed).
 	old := minPickGap
-	minPickGap = time.Hour // 超大窗口：任何 lastUsed 都在窗口内
+	minPickGap = time.Hour // огромное окно: любой lastUsed внутри окна
 	defer func() { minPickGap = old }()
 
 	p := New("")
 	for i := 0; i < 5; i++ {
 		p.Add(&auth.Auth{UID: fmt.Sprintf("a%d", i)})
 	}
-	// 直接构造 lastUsed：不经过 Pick（避免 Pick 改写 lastUsed）。
+	// lastUsed конструируем напрямую: не через Pick (чтобы Pick не перезаписал lastUsed).
 	order := []string{"a4", "a3", "a2", "a1", "a0"}
 	p.mu.Lock()
 	for i, uid := range order {
-		p.byUID[uid].lastUsed = time.Now().Add(-time.Duration(len(order)-i) * time.Second) // a4 最旧
+		p.byUID[uid].lastUsed = time.Now().Add(-time.Duration(len(order)-i) * time.Second) // a4 самый старый
 	}
 	p.mu.Unlock()
 
@@ -314,12 +314,12 @@ func TestCooldownPersists(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
-	p.Flush() // 状态变更走 dirty 标志，落盘由 Flush / 后台 goroutine 负责
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足") // данные Reason: «недостаточно баланса», не переводим
+	p.Flush() // изменения состояния идут через флаг dirty, запись на диск — через Flush / фоновую goroutine
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	st, ok := p2.Status("u1")
-	if !ok || !st.Cooling || st.Reason != "余额不足" {
+	if !ok || !st.Cooling || st.Reason != "余额不足" { // данные Reason: «недостаточно баланса», не переводим
 		t.Fatalf("cooldown lost after reload: %+v ok=%v", st, ok)
 	}
 }
@@ -345,7 +345,7 @@ func TestDisablePersists(t *testing.T) {
 func TestReenableIfCredits(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足") // данные Reason: «недостаточно баланса», не переводим
 	p.ReenableIfCredits("u1", 500)
 	got := p.Pick()
 	if got == nil || got.UID != "u1" {
@@ -356,7 +356,7 @@ func TestReenableIfCredits(t *testing.T) {
 func TestReenableZeroCreditsKeepsCooling(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足") // данные Reason: «недостаточно баланса», не переводим
 	p.ReenableIfCredits("u1", 0)
 	st, _ := p.Status("u1")
 	if !st.Cooling {
@@ -375,8 +375,8 @@ func TestReenableDoesNotTouchDisabled(t *testing.T) {
 }
 
 func TestNoteErrorAccumulatesErrTotal(t *testing.T) {
-	// NoteError 语义变更：不再有独立的 err 冷却（CoolErr 已并入熔断器），
-	// 只累计 errTotal（不清零，供成功率权重）并喂熔断器 fails。
+	// Смена семантики NoteError: отдельного err-кулдауна больше нет (CoolErr merged в прерыватель),
+	// только копим errTotal (не обнуляем, для веса успешности) и кормим fails прерывателя.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.NoteError("u1")
@@ -394,12 +394,12 @@ func TestNoteErrorAccumulatesErrTotal(t *testing.T) {
 }
 
 func TestNoteSuccessResetsBreakerNotErrTotal(t *testing.T) {
-	// NoteSuccess 清 fails/熔断（运行态），但不清 errTotal（累计值）。
+	// NoteSuccess снимает fails/прерывание (рабочее состояние), но не снимает errTotal (накопленное значение).
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetBreaker(2, time.Hour, 2*time.Hour)
 	p.NoteError("u1")
-	p.NoteError("u1") // 触发熔断
+	p.NoteError("u1") // срабатывает прерывание
 	if p.internalHealthy("u1") {
 		t.Fatal("breaker should be open (unhealthy) after 2 failures")
 	}
@@ -432,14 +432,14 @@ func TestNoteSuccessIncrementsAndRecords(t *testing.T) {
 }
 
 func TestReenableClearsCoolingNotBreaker(t *testing.T) {
-	// C5：签到解冻只清冷却（until/coolKind/reason）+ 更新 credits，不清熔断
-	// （fails/retryCount/breakerUntil）。签到成功只证明余额与 billing 通道恢复，
-	// 不证明 chat 通道健康——熔断仍按 breakerUntil 退避到期或 NoteSuccess 恢复。
+	// C5: разморозка чекином снимает только кулдаун (until/coolKind/reason) + обновляет credits, прерывание не снимает
+	// (fails/retryCount/breakerUntil). Успех чекина доказывает лишь восстановление баланса и billing-канала,
+	// здоровье chat-канала не доказывает — прерывание восстанавливается по истечении отката breakerUntil или через NoteSuccess.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownUntilTomorrow4AM("u1", "余额不足") // 硬冷却（喂 fails，但此时阈值默认 3，不熔断）
+	p.CooldownUntilTomorrow4AM("u1", "余额不足") // жёсткий кулдаун (кормит fails, но порог сейчас по умолчанию 3 — не прерывает); "余额不足" — данные Reason «недостаточно баланса», не переводим
 	p.SetBreaker(1, time.Hour, time.Hour)
-	p.NoteError("u1") // 触发熔断（fails→阈值1→fails=0, retryCount=1, breakerUntil 非零）
+	p.NoteError("u1") // срабатывает прерывание (fails→порог 1→fails=0, retryCount=1, breakerUntil ненулевой)
 	p.ReenableIfCredits("u1", 500)
 	st, _ := p.Status("u1")
 	if st.Reason != "" || st.Credits != 500 {
@@ -451,18 +451,18 @@ func TestReenableClearsCoolingNotBreaker(t *testing.T) {
 	if st.BreakerUntil.IsZero() {
 		t.Fatal("signin must NOT clear breakerUntil (chat health unresolved)")
 	}
-	// 熔断仍在 → 账号仍不可选（直至 breakerUntil 到期）。
+	// Прерывание ещё действует → аккаунт всё ещё нельзя выбрать (пока не истечёт breakerUntil).
 	if p.internalHealthy("u1") {
 		t.Fatal("account should stay unhealthy while breaker active after signin")
 	}
 }
 
 func TestReenableKeepsBreaker(t *testing.T) {
-	// C5 回归锁定新语义：仅熔断（无冷却）的账号，签到解冻不得清熔断。
+	// Регрессия C5 фиксирует новую семантику: у аккаунта только с прерыванием (без кулдауна) разморозка чекином прерывание снимать не должна.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetBreaker(1, time.Hour, time.Hour)
-	p.NoteError("u1") // 触发熔断
+	p.NoteError("u1") // срабатывает прерывание
 	if bt, _ := p.breakerUntil("u1"); bt.IsZero() {
 		t.Fatal("precondition: breaker should be open")
 	}
@@ -480,10 +480,10 @@ func TestCoolKindPersistsAcrossReload(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足") // данные Reason: «недостаточно баланса», не переводим
 	p.Flush()
 
-	// 旧文件缺新字段时零值 → 冷却应仍工作（向后兼容）。
+	// В старом файле новых полей нет, там нули → кулдаун всё равно должен работать (обратная совместимость).
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	st, ok := p2.Status("u1")
@@ -500,17 +500,17 @@ func TestStateRoundTripExtendedFields(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
-	p.NoteSuccess("u1") // successCount=1，last_success 非零
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足") // данные Reason: «недостаточно баланса», не переводим
+	p.NoteSuccess("u1") // successCount=1, last_success ненулевой
 	p.NoteSuccess("u1") // successCount=2
-	p.NoteError("u1")   // errTotal=1（累计），last_err 非零
+	p.NoteError("u1")   // errTotal=1 (накопленный), last_err ненулевой
 	p.Flush()
 
 	raw, err := os.ReadFile(fp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// JSON tag 全小写下划线；err_total 落盘，err_count 不再落盘。
+	// JSON-теги строчными с подчёркиванием; err_total пишется на диск, err_count больше не пишется.
 	for _, want := range []string{`"cool_kind"`, `"success_count"`, `"err_total"`, `"last_success"`, `"last_err"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("state.json missing %s:\n%s", want, raw)
@@ -520,7 +520,7 @@ func TestStateRoundTripExtendedFields(t *testing.T) {
 		t.Errorf("state.json should not write legacy err_count:\n%s", raw)
 	}
 
-	// 重载后字段保留
+	// После перезагрузки поля сохраняются
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	st, ok := p2.Status("u1")
@@ -539,7 +539,7 @@ func TestStateRoundTripExtendedFields(t *testing.T) {
 }
 
 func TestLoadLegacyErrCountMigratesToErrTotal(t *testing.T) {
-	// 迁移测试：旧 state.json 只含 err_count（连续错误）→ 加载后 err_total 正确。
+	// Тест миграции: старый state.json содержит только err_count (последовательные ошибки) → после загрузки err_total правильный.
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
 	legacy := `{"accounts":{"u1":{"credits":100,"err_count":7}}}`
@@ -555,7 +555,7 @@ func TestLoadLegacyErrCountMigratesToErrTotal(t *testing.T) {
 	if st.ErrTotal != 7 {
 		t.Errorf("err_total=%d want 7 (migrated from legacy err_count)", st.ErrTotal)
 	}
-	// 新字段优先：二者并存时取较大者。
+	// Новые поля в приоритете: если оба есть — берём большее.
 	both := `{"accounts":{"u1":{"credits":100,"err_count":3,"err_total":9}}}`
 	if err := os.WriteFile(fp, []byte(both), 0o600); err != nil {
 		t.Fatal(err)
@@ -579,21 +579,21 @@ func TestStatusCoolKindDefaultsWhenNotCooling(t *testing.T) {
 func TestNextDay4AMBoundaries(t *testing.T) {
 	cases := []struct {
 		name string
-		now  string // RFC3339 (UTC 表示)
-		want string // 下一个 04:00（同一时区，UTC 表示）
+		now  string // RFC3339 (представление в UTC)
+		want string // ближайшие 04:00 (тот же часовой пояс, представление в UTC)
 	}{
-		{"普通日", "2026-08-28T17:00:00+08:00", "2026-08-29T04:00:00+08:00"},
-		// 凌晨 00:00~04:00 触发硬冷却：当天 04:00 尚未到，冷却应落在当天（而非次日），
-		// 否则多冷约一天（原 bug）。
-		{"凌晨02:30", "2026-08-28T02:30:00+08:00", "2026-08-28T04:00:00+08:00"},
-		{"凌晨00:00", "2026-08-28T00:00:00+08:00", "2026-08-28T04:00:00+08:00"},
-		{"凌晨03:59:59", "2026-08-28T03:59:59+08:00", "2026-08-28T04:00:00+08:00"},
-		{"正好4点", "2026-08-28T04:00:00+08:00", "2026-08-29T04:00:00+08:00"},
-		{"4点刚过", "2026-08-28T04:00:01+08:00", "2026-08-29T04:00:00+08:00"},
-		{"月末(31天月)", "2026-01-31T12:00:00+08:00", "2026-02-01T04:00:00+08:00"},
-		{"月末(28天月)", "2026-02-28T12:00:00+08:00", "2026-03-01T04:00:00+08:00"},
-		{"闰年月末", "2028-02-29T12:00:00+08:00", "2028-03-01T04:00:00+08:00"},
-		{"年末", "2026-12-31T23:59:59+08:00", "2027-01-01T04:00:00+08:00"},
+		{"обычный день", "2026-08-28T17:00:00+08:00", "2026-08-29T04:00:00+08:00"},
+		// При срабатывании жёсткого кулдауна ночью 00:00~04:00: сегодняшние 04:00 ещё впереди, кулдаун должен лечь на сегодня (а не на завтра),
+		// иначе лишний почти день холода (исходный баг).
+		{"ночь 02:30", "2026-08-28T02:30:00+08:00", "2026-08-28T04:00:00+08:00"},
+		{"ночь 00:00", "2026-08-28T00:00:00+08:00", "2026-08-28T04:00:00+08:00"},
+		{"ночь 03:59:59", "2026-08-28T03:59:59+08:00", "2026-08-28T04:00:00+08:00"},
+		{"ровно 4 часа", "2026-08-28T04:00:00+08:00", "2026-08-29T04:00:00+08:00"},
+		{"чуть после 4", "2026-08-28T04:00:01+08:00", "2026-08-29T04:00:00+08:00"},
+		{"конец месяца (31-дневный)", "2026-01-31T12:00:00+08:00", "2026-02-01T04:00:00+08:00"},
+		{"конец месяца (28-дневный)", "2026-02-28T12:00:00+08:00", "2026-03-01T04:00:00+08:00"},
+		{"конец високосного февраля", "2028-02-29T12:00:00+08:00", "2028-03-01T04:00:00+08:00"},
+		{"конец года", "2026-12-31T23:59:59+08:00", "2027-01-01T04:00:00+08:00"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -616,7 +616,7 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	before := time.Now()
-	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	p.CooldownUntilTomorrow4AM("u1", "余额不足") // данные Reason: «недостаточно баланса», не переводим
 	after := time.Now()
 	st, ok := p.Status("u1")
 	if !ok {
@@ -625,11 +625,11 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	if !st.Cooling {
 		t.Fatalf("should be cooling: %+v", st)
 	}
-	if st.Reason != "余额不足" {
+	if st.Reason != "余额不足" { // данные Reason: «недостаточно баланса», не переводим
 		t.Errorf("reason=%q", st.Reason)
 	}
-	// 冷却截止必须是"此刻之后的最近一个 04:00"：晚于 now、距今不超过 24h
-	//（凌晨 00:00~04:00 触发时落在当天 04:00，其余时段落在次日 04:00，跨度恒 < 24h）。
+	// Конец кулдауна обязан быть «ближайшими 04:00 после текущего момента»: позже now и не дальше 24h
+	// (при срабатывании ночью 00:00~04:00 ложится на сегодняшние 04:00, в остальное время — на завтрашние 04:00, размах всегда < 24h).
 	if st.Until.Before(after) {
 		t.Errorf("until %v is in the past (call span %v..%v)", st.Until, before, after)
 	}
@@ -639,7 +639,7 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	if d := st.Until.Sub(after); d > 24*time.Hour {
 		t.Errorf("until %v is more than 24h out: %v", st.Until, d)
 	}
-	// 全冷却时余额耗尽（hard）号不参与兜底 → 返回 nil（等签到恢复）。
+	// При полном кулдауне номер с исчерпанным балансом (hard) в фолбэке не участвует → возвращаем nil (ждёт восстановления чекином).
 	if got := p.Pick(); got != nil {
 		t.Fatalf("all-hard-cooling should return nil (hard excluded from fallback), got %+v", got)
 	}
@@ -650,21 +650,21 @@ func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	p.CooldownUntilTomorrow4AM("u1", "余额不足") // данные Reason: «недостаточно баланса», не переводим
 	p.Flush()
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	st, ok := p2.Status("u1")
-	if !ok || st.Until.Hour() != 4 || st.Reason != "余额不足" {
+	if !ok || st.Until.Hour() != 4 || st.Reason != "余额不足" { // данные Reason: «недостаточно баланса», не переводим
 		t.Errorf("status after reload=%+v ok=%v", st, ok)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 软冷却指数退避（softStreak）
+// Экспоненциальный откат мягкого кулдауна (softStreak)
 // ---------------------------------------------------------------------------
 
-// wantCoolSec 断言账号当前冷却剩余秒数 ≈ want（±tol 秒，容忍测试内的 tick 漂移）。
+// wantCoolSec проверяет, что текущий остаток кулдауна аккаунта ≈ want (±tol секунд, терпим тиковый дрейф внутри теста).
 func wantCoolSec(t *testing.T, p *Pool, uid string, want int64, tol int64) {
 	t.Helper()
 	st, ok := p.Status(uid)
@@ -680,10 +680,10 @@ func wantCoolSec(t *testing.T, p *Pool, uid string, want int64, tol int64) {
 }
 
 func TestCooldownSoftExponentialBackoff(t *testing.T) {
-	// 同一账号连续软冷却 → 时长按 2 倍指数增长（不依赖真实等待，只看剩余时长）。
+	// Последовательные мягкие кулдауны одного аккаунта → длительность растёт вдвое экспоненциально (без реального ожидания, смотрим только остаток).
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetSoftRateMax(time.Hour) // 封顶 1h：本用例三步（600/1200/2400）都不触及
+	p.SetSoftRateMax(time.Hour) // потолок 1h: три шага кейса (600/1200/2400) его не достигают
 
 	for i, want := range []int64{600, 1200, 2400} {
 		p.Cooldown("u1", CoolSoft, 600*time.Second, "429 rate limit")
@@ -695,7 +695,7 @@ func TestCooldownSoftExponentialBackoff(t *testing.T) {
 }
 
 func TestCooldownSoftCappedBySoftRateMax(t *testing.T) {
-	// 注入封顶：streak 3 的 400s 被压到 250s。
+	// Внедряем потолок: 400s streak 3 прижимаются к 250s.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(250 * time.Second)
@@ -709,7 +709,7 @@ func TestCooldownSoftCappedBySoftRateMax(t *testing.T) {
 }
 
 func TestCooldownSoftDefaultCapWhenUnset(t *testing.T) {
-	// 未注入 softRateMax → 按 2h 封顶（避免裸用池时退避无上限）。
+	// softRateMax не внедрён → потолок по 2h (чтобы в голом пуле откат не был безграничным).
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	for i, want := range []int64{600, 1200, 2400, 4800, 7200} {
@@ -722,7 +722,7 @@ func TestCooldownSoftDefaultCapWhenUnset(t *testing.T) {
 }
 
 func TestSetSoftRateMaxIgnoresNonPositive(t *testing.T) {
-	// 非正值保留原值（风格同 SetBreaker）：0 不应把封顶清零导致无上限。
+	// Неположительные сохраняют текущее (стиль как у SetBreaker): 0 не должен обнулять потолок в безграничность.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(0)
@@ -730,11 +730,11 @@ func TestSetSoftRateMaxIgnoresNonPositive(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
 	}
-	wantCoolSec(t, p, "u1", 7200, 3) // 仍是 2h 封顶（第 6 步 19200s → 7200s）
+	wantCoolSec(t, p, "u1", 7200, 3) // всё ещё потолок 2h (6-й шаг 19200s → 7200s)
 }
 
 func TestCooldownSoftStreakResetBySuccess(t *testing.T) {
-	// 成功即证明账号恢复 → streak 归零，下次软冷却回到基数。
+	// Успех доказывает восстановление аккаунта → streak в ноль, следующий мягкий кулдаун возвращается к базе.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
@@ -750,8 +750,8 @@ func TestCooldownSoftStreakResetBySuccess(t *testing.T) {
 }
 
 func TestCooldownSoftStreakResetByReenable(t *testing.T) {
-	// 签到解冻（reviveCoolingLocked）清 cooling 域 → softStreak 一并归零；
-	// 熔断域（fails/retryCount/breakerUntil）不动，与既有 C5 语义一致。
+	// Разморозка чекином (reviveCoolingLocked) снимает домен cooling → softStreak заодно в ноль;
+	// домен прерывания (fails/retryCount/breakerUntil) не трогаем, вровень с существующей семантикой C5.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
@@ -775,10 +775,10 @@ func TestCooldownSoftStreakResetByReenable(t *testing.T) {
 }
 
 func TestCooldownHardDoesNotAdvanceSoftStreak(t *testing.T) {
-	// 硬冷却（余额耗尽）时长由签到时点决定，不参与软退避指数。
+	// Длительность жёсткого кулдауна (баланс исчерпан) определяется моментом чекина, в мягком откате не участвует.
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	p.CooldownUntilTomorrow4AM("u1", "余额不足") // данные Reason: «недостаточно баланса», не переводим
 	if st, _ := p.Status("u1"); st.SoftStreak != 0 {
 		t.Fatalf("hard cooldown must not touch soft_streak, got %d", st.SoftStreak)
 	}
@@ -808,13 +808,13 @@ func TestSoftStreakPersistsAcrossReload(t *testing.T) {
 	if st, _ := p2.Status("u1"); st.SoftStreak != 2 {
 		t.Fatalf("soft_streak after reload=%d want 2", st.SoftStreak)
 	}
-	// 退避从持久化的 streak 继续：第 3 次 → 2400s。
+	// Откат продолжается с сохранённого streak: 3-й раз → 2400s.
 	p2.Cooldown("u1", CoolSoft, 600*time.Second, "x")
 	wantCoolSec(t, p2, "u1", 2400, 3)
 }
 
 func TestSoftStreakMissingInLegacyStateFile(t *testing.T) {
-	// 旧 state.json 无 soft_streak → 零值兼容，退避从基数重新开始。
+	// В старом state.json нет soft_streak → совместимость через ноль, откат начинается заново с базы.
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
 	if err := os.WriteFile(fp, []byte(`{"accounts":{"u1":{"credits":100}}}`), 0o600); err != nil {
@@ -830,52 +830,42 @@ func TestSoftStreakMissingInLegacyStateFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// issue #31：429 6004 模型级限流 → 按上游重置时间收窄冷却 + 模型级豁免选号
+// issue #31: лимит 429 6004 уровня модели → сужаем кулдаун по времени сброса апстрима + освобождение выбора по модели
 // ---------------------------------------------------------------------------
 
 func TestCooldownSoftForModelParsedUntil(t *testing.T) {
-	// 6004 msg 带「将在 … 重置」→ modelCooldowns[glm-5.3].Until 精确等于解析时间
-	// （wall-clock 判断）。用未来 5 分钟的时间戳：解析后 ≈ now+5m，远短于固定 600s
-	// 基数的指数退避，证明"上游明说重置时间"优先于"600s 起指数退避"。
+	// 6004 msg с «сброс будет в …» → until точно равен разобранному времени (проверка wall-clock).
+	// Берём метку на 5 минут в будущем: после разбора until ≈ now+5m — куда короче экспоненциального отката с фиксированной базы 600s,
+	// доказывает, что «апстрим прямо назвал время сброса» важнее «отката с базы 600s».
 	reset := time.Now().Add(5 * time.Minute)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "429 rate limit")
 	st, ok := p.Status("u1")
-	if !ok {
-		t.Fatalf("status missing: %+v", st)
+	if !ok || st.CoolKind != "soft_rate" {
+		t.Fatalf("want soft_rate cooling: %+v ok=%v", st, ok)
 	}
-	// 6004 模型级冷却：账号级 until 不被写（独立模型冷却），台账携带模型截止。
-	if !st.Until.IsZero() {
-		t.Errorf("until=%v 应为零值（6004 不写账号级 until）", st.Until)
-	}
-	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
-		t.Fatalf("rate_limited_models=%+v want [glm-5.3] 的模型级台账", st.RateLimitedModels)
-	}
-	if d := st.RateLimitedModels[0].Until.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("model until=%v want ~reset=%v (diff %v)", st.RateLimitedModels[0].Until, reset, d)
+	if d := st.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("until=%v want ~reset=%v (diff %v)", st.Until, reset, d)
 	}
 }
 
 func TestCooldownSoftForModelCappedBySoftRateMax(t *testing.T) {
-	// 解析时间超出 soft_rate_max → 模型级冷却 until 截断到 soft_rate_max（不无限期拉黑）。
+	// Разобранное время вылезает за soft_rate_max → усекаем до soft_rate_max (без бесконечного бана).
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(10 * time.Minute)
-	reset := time.Now().Add(2 * time.Hour) // 远超过封顶 10m
+	reset := time.Now().Add(2 * time.Hour) // сильно больше потолка 10m
 	before := time.Now()
 	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "429 rate limit")
 	st, _ := p.Status("u1")
-	if len(st.RateLimitedModels) != 1 {
-		t.Fatalf("rate_limited_models=%+v want 1 行", st.RateLimitedModels)
-	}
-	if d := st.RateLimitedModels[0].Until.Sub(before); d > 10*time.Minute+time.Second {
-		t.Errorf("model until=%v want capped at soft_rate_max=10m", st.RateLimitedModels[0].Until)
+	if st.Until.Sub(before) > 10*time.Minute+time.Second {
+		t.Errorf("until=%v want capped at soft_rate_max=10m", st.Until)
 	}
 }
 
 func TestCooldownSoftForModelNoResetFallbackBackoff(t *testing.T) {
-	// 无解析时间（resetAt 零值）→ 退回 600s 起指数退避（现状不动）。
+	// Нет разобранного времени (resetAt нулевой) → откат к откату с базы 600s (текущее поведение не трогаем).
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(time.Hour)
@@ -885,15 +875,15 @@ func TestCooldownSoftForModelNoResetFallbackBackoff(t *testing.T) {
 	wantCoolSec(t, p, "u1", 1200, 3)
 }
 
-// TestPickExcludingForModelSkipsSoftCoolingSameModel 冷却中账号（6004 带解析时间，
-// 已记录模型）+ 同 model 请求 → 仍不可选（现状语义保持）。
+// TestPickExcludingForModelSkipsSoftCoolingSameModel: охлаждаемый аккаунт (6004 с разобранным временем,
+// модель записана) + запрос с той же model → всё ещё нельзя выбрать (текущая семантика сохраняется).
 func TestPickExcludingForModelSkipsSoftCoolingSameModel(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
 	p.SetCredits("u1", 1000)
 	p.SetCredits("u2", 1)
-	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 最高分 u1
+	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → топ u1
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
 	got := p.PickExcludingForModel(nil, "glm-5.3")
 	if got == nil || got.UID != "u2" {
@@ -901,15 +891,15 @@ func TestPickExcludingForModelSkipsSoftCoolingSameModel(t *testing.T) {
 	}
 }
 
-// TestPickExcludingForModelAllowsDifferentModel 6004 冷却中的账号 + 不同 model
-// → 视为可用，可选到该号（真·单模型限流，切模型立即可用）。
+// TestPickExcludingForModelAllowsDifferentModel: аккаунт в кулдауне 6004 + другая model
+// → считается доступным, номер выбирается (настоящий лимит одной модели, смена модели сразу доступна).
 func TestPickExcludingForModelAllowsDifferentModel(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetCredits("u1", 1000)
 	p.Add(&auth.Auth{UID: "u2"})
 	p.SetCredits("u2", 1)
-	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 最高分 u1
+	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → топ u1
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
 	got := p.PickExcludingForModel(nil, "hy3-x")
 	if got == nil || got.UID != "u1" {
@@ -917,8 +907,8 @@ func TestPickExcludingForModelAllowsDifferentModel(t *testing.T) {
 	}
 }
 
-// TestCooldownSoftWithoutModelRecordsNone 非 6004 的普通软冷却（resetAt 零值，
-// 不写 modelCooldowns）→ 退回账号级 until 冷却，不因模型切换而豁免（现状语义）。
+// TestCooldownSoftWithoutModelRecordsNone: обычный мягкий кулдаун не-6004 (resetAt нулевой,
+// softRateModel не записываем) → смена модели не освобождает (текущая семантика).
 func TestCooldownSoftWithoutModelRecordsNone(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -927,15 +917,15 @@ func TestCooldownSoftWithoutModelRecordsNone(t *testing.T) {
 	p.SetCredits("u2", 1)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.CooldownSoftForModel("u1", time.Minute, time.Time{}, "", "429 rate limit")
-	// 冷却中 + 不同 model 请求仍跳过 u1（无模型级冷却条目，不豁免）。
+	// В кулдауне + запрос с другой model всё равно пропускает u1 (нет softRateModel — нет освобождения).
 	got := p.PickExcludingForModel(nil, "hy3-x")
 	if got == nil || got.UID != "u2" {
 		t.Fatalf("no model recorded → must not bypass, got %+v", got)
 	}
 }
 
-// TestPickExcludingForModelBreakerStillBlocks 模型豁免只豁免软冷却维度，
-// 熔断（breakerUntil）仍拦截：6004 冷却 + 熔断中的账号，切模型也不可选。
+// TestPickExcludingForModelBreakerStillBlocks: освобождение модели снимает только измерение мягкого кулдауна,
+// прерывание (breakerUntil) всё равно блокирует: аккаунт в кулдауне 6004 + прерывании со сменой модели выбрать нельзя.
 func TestPickExcludingForModelBreakerStillBlocks(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -944,7 +934,7 @@ func TestPickExcludingForModelBreakerStillBlocks(t *testing.T) {
 	p.SetCredits("u2", 1)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.SetBreaker(1, time.Hour, time.Hour)
-	p.NoteError("u1") // u1 熔断
+	p.NoteError("u1") // u1 в прерывании
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
 	got := p.PickExcludingForModel(nil, "hy3-x")
 	if got == nil || got.UID != "u2" {
@@ -952,65 +942,10 @@ func TestPickExcludingForModelBreakerStillBlocks(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ServableNow 的模型级豁免（issue #31 探活侧）：6004 单模型限流时，账号对该模型
-// 不可用但对其他模型仍可选，/healthz 不得因"全号被某一模型限流"而误报 503。
-// ---------------------------------------------------------------------------
-
-func TestServableNowModelExemptCounts(t *testing.T) {
-	// 单号处于 6004 模型级软冷却（带解析时间、记录 modelCooldowns）→ 其他模型仍可达，
-	// ServableNow 必须为 true（与 chat 的 healthyForModel 放行切模型请求同口径）。
-	// 反向（同模型不可选）已由 TestPickExcludingForModelSkipsSoftCoolingSameModel 覆盖；
-	// 本池无其他候选，同模型选号会走全冷却兜底，不在此重复断言。
-	p := New("")
-	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
-	if !p.ServableNow() {
-		t.Fatal("model-exempt account must keep pool servable (other models reachable)")
-	}
-}
-
-func TestServableNowPlainSoftNotExempt(t *testing.T) {
-	// 普通软冷却（无 modelCooldowns，非 6004 模型级）→ 账号级不可用，ServableNow 必须 false。
-	// 守门：豁免不得从模型级泄漏到普通冷却。
-	p := New("")
-	p.Add(&auth.Auth{UID: "u1"})
-	p.Cooldown("u1", CoolSoft, time.Minute, "429 rate limit")
-	if p.ServableNow() {
-		t.Fatal("plain soft cooling (no model) must NOT be servable")
-	}
-}
-
-func TestServableNowExemptButInFlightFull(t *testing.T) {
-	// 模型豁免形态 + 在途占满 → 仍不可服务（在途维度独立于豁免，探活须叠加判定）。
-	p := New("")
-	p.Add(&auth.Auth{UID: "u1"})
-	p.SetMaxInFlight(1)
-	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
-	if !p.Acquire("u1") {
-		t.Fatal("acquire should succeed at max=1")
-	}
-	defer p.Release("u1")
-	if p.ServableNow() {
-		t.Fatal("model-exempt but in-flight-full account must not count as servable")
-	}
-}
-
-func TestServableNowExemptButDisabled(t *testing.T) {
-	// 模型豁免形态 + 被禁用（session dead）→ disabled 优先级最高，ServableNow 必须 false。
-	p := New("")
-	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
-	p.Disable("u1", "session dead")
-	if p.ServableNow() {
-		t.Fatal("disabled account must never be servable, even in model-exempt form")
-	}
-}
-
-// TestModelCooldownsClearedByPlainCooldown 回归：6004 模型冷却后，若账号又经历一次
-// **非模型级**软冷却（plain Cooldown），modelCooldowns 必须被清空——否则上次 6004 的
-// 模型豁免会泄漏到本次账号级限流上，导致"换模型请求"错误绕过本次冷却。
-func TestModelCooldownsClearedByPlainCooldown(t *testing.T) {
+// TestSoftRateModelClearedByPlainCooldown — регрессия: после модельного кулдауна 6004, если аккаунт переживает ещё один
+// мягкий кулдаун **не уровня модели** (plain Cooldown), softRateModel обязан стереться — иначе освобождение прошлого 6004
+// потечёт в текущий лимит уровня аккаунта, и «запрос со сменой модели» ошибочно обойдёт этот кулдаун.
+func TestSoftRateModelClearedByPlainCooldown(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -1019,24 +954,24 @@ func TestModelCooldownsClearedByPlainCooldown(t *testing.T) {
 	p.SetCredits("u2", 1)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 
-	// 1) 6004 带解析时间 → 记录模型 glm-5.3。
+	// 1) 6004 с разобранным временем → записываем модель glm-5.3.
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004")
 	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "u1" {
 		t.Fatalf("precondition: different-model should bypass, got %+v", got)
 	}
-	// 2) 账号恢复后经历普通账号级软冷却（无模型语义）。
-	p.NoteSuccess("u1") // 还原 fresh 状态（Cooldown 会重设 until）
+	// 2) После восстановления аккаунт переживает обычный мягкий кулдаун уровня аккаунта (без модельной семантики).
+	p.NoteSuccess("u1") // возвращаем fresh-состояние (Cooldown переставит until)
 	p.Cooldown("u1", CoolSoft, time.Minute, "429 rate limit")
-	// 3) 换模型请求不得再豁免（modelCooldowns 已清空）。
+	// 3) Запрос со сменой модели больше не освобождается (softRateModel уже стёрт).
 	got := p.PickExcludingForModel(nil, "hy3-x")
 	if got == nil || got.UID != "u2" {
-		t.Fatalf("plain cooldown must clear modelCooldowns (no bypass), got %+v", got)
+		t.Fatalf("plain cooldown must clear softRateModel (no bypass), got %+v", got)
 	}
 }
 
-// TestModelCooldownsNotPersistedToState 新字段 modelCooldowns 缺省空 = 现状兼容：
-// 旧 state.json 不写它也能正常加载；落盘不引入该字段（运行态语义，重启即清零）。
-func TestModelCooldownsNotPersistedToState(t *testing.T) {
+// TestSoftRateModelNotPersistedToState: новое поле softRateModel по умолчанию пусто = совместимость с текущим:
+// старый state.json без него нормально грузится; запись на диск это поле не вносит (семантика рабочего состояния, рестарт обнуляет).
+func TestSoftRateModelNotPersistedToState(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
@@ -1047,124 +982,21 @@ func TestModelCooldownsNotPersistedToState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "model_cooldowns") || strings.Contains(string(raw), "modelCooldowns") {
-		t.Errorf("state.json should not persist modelCooldowns (runtime-only):\n%s", raw)
+	if strings.Contains(string(raw), "soft_rate_model") {
+		t.Errorf("state.json should not persist soft_rate_model (runtime-only):\n%s", raw)
 	}
-	// 重载后 modelCooldowns 清零（运行态语义，重启退化为账号级冷却现状）。
+	// После перезагрузки аккаунт всё ещё в кулдауне (until сохраняется), softRateModel обнулён.
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok || !st.Cooling {
+		t.Fatalf("cooldown should persist after reload: %+v ok=%v", st, ok)
+	}
 	p2.mu.RLock()
-	n := len(p2.byUID["u1"].modelCooldowns)
+	em := p2.byUID["u1"].softRateModel
 	p2.mu.RUnlock()
-	if n != 0 {
-		t.Errorf("modelCooldowns should reset on reload, found %d entries", n)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// issue #36：限额台账——/status 透出仍在限额的模型 + 预计恢复时间
-// ---------------------------------------------------------------------------
-
-// TestRateLimitedModelsInStatus 6004 带解析时间 → modelCooldowns 被写入 →
-// Status.RateLimitedModels 输出含限流模型 + 冷却截止 + 上游原始重置墙钟。
-func TestRateLimitedModelsInStatus(t *testing.T) {
-	p := New("")
-	p.Add(&auth.Auth{UID: "u1"})
-	reset := time.Now().Add(35 * time.Minute)
-	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "6004 model rate limit")
-
-	st, ok := p.Status("u1")
-	if !ok {
-		t.Fatalf("status missing")
-	}
-	if len(st.RateLimitedModels) != 1 {
-		t.Fatalf("rate_limited_models=%v want 1 行", st.RateLimitedModels)
-	}
-	row := st.RateLimitedModels[0]
-	if row.Model != "glm-5.3" {
-		t.Errorf("model=%q want glm-5.3", row.Model)
-	}
-	if row.Reason != "6004 model rate limit" {
-		t.Errorf("reason=%q want 6004 model rate limit", row.Reason)
-	}
-	// 6004 模型级冷却不写账号级 until：st.Until 应为零值，模型截止在台账行里。
-	if !st.Until.IsZero() {
-		t.Errorf("Status.Until=%v 应为零值（6004 不写账号级 until）", st.Until)
-	}
-	// row.Until = 该模型的独立冷却截止（≈ reset，35m < soft_rate_max 2h 未截断）。
-	if d := row.Until.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("row.until=%v want ~%v", row.Until, reset)
-	}
-	// ResetAt 是未经 6004 截断的上游重置墙钟（35m < soft_rate_max 2h，因此未被截断）。
-	if d := row.ResetAt.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("reset_at=%v want ~%v", row.ResetAt, reset)
-	}
-}
-
-// TestRateLimitedModelsRetainsUncappedResetAt soft_rate_max 截断了 until，
-// 但台账必须保留上游未截断的原始重置墙钟（issue #36：运维按真实恢复时刻观察）。
-func TestRateLimitedModelsRetainsUncappedResetAt(t *testing.T) {
-	p := New("")
-	p.Add(&auth.Auth{UID: "u1"})
-	p.SetSoftRateMax(10 * time.Minute)
-	reset := time.Now().Add(2 * time.Hour) // 远超封顶 10m
-	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "6004 model rate limit")
-
-	st, _ := p.Status("u1")
-	if len(st.RateLimitedModels) != 1 {
-		t.Fatalf("rate_limited_models=%v want 1 行", st.RateLimitedModels)
-	}
-	row := st.RateLimitedModels[0]
-	// row.Until = 该模型的冷却截止（被截断到封顶 ≤ 10m）。
-	if rem := row.Until.Sub(time.Now()); rem <= 0 || rem > 10*time.Minute+time.Second {
-		t.Errorf("row.until 应在 (0, 10m] 区间，实际剩余 %v", rem)
-	}
-	// 6004 模型级冷却不写账号级 until：st.Until 为零值。
-	if !st.Until.IsZero() {
-		t.Errorf("Status.Until=%v 应为零值（6004 不写账号级 until）", st.Until)
-	}
-	// reset_at 保留原始 2h 墙钟（未被截断）。
-	if d := row.ResetAt.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("reset_at=%v want ~2h 后=%v", row.ResetAt, reset)
-	}
-}
-
-// TestRateLimitedModelsExpired 限额到期后台账从 Status 消失（恢复）。
-// 用近未来 30ms 的重置墙钟：初始显示台账，等墙钟过后台账消失 + 账号退出冷却。
-// （带解析时间 6004 的 until 由 resetAt 决定，故等待几百 ms 即可确定性触达过期边界。）
-func TestRateLimitedModelsExpired(t *testing.T) {
-	p := New("")
-	p.Add(&auth.Auth{UID: "u1"})
-	reset := time.Now().Add(30 * time.Millisecond)
-	p.CooldownSoftForModel("u1", time.Hour, reset, "glm-5.3", "6004 model rate limit")
-	if st, _ := p.Status("u1"); len(st.RateLimitedModels) != 1 {
-		t.Fatalf("初始应对该模型限额显示台账: %+v", st.RateLimitedModels)
-	}
-	time.Sleep(80 * time.Millisecond) // 越过重置墙钟（until 已过）
-	st, _ := p.Status("u1")
-	if len(st.RateLimitedModels) != 0 {
-		t.Errorf("到期后台账应消失: %+v", st.RateLimitedModels)
-	}
-	if st.Cooling {
-		t.Errorf("到期后账号应退出冷却: %+v", st)
-	}
-}
-
-// TestRateLimitedModelsNoLimitZeroRegression 未限流 / 普通软冷却账号零回归：
-// RateLimitedModels 必须为空（nil），不产生台账行。
-func TestRateLimitedModelsNoLimitZeroRegression(t *testing.T) {
-	p := New("")
-	p.Add(&auth.Auth{UID: "ok"})
-	p.Add(&auth.Auth{UID: "plain"})
-	p.Cooldown("plain", CoolSoft, time.Minute, "429 rate limit") // 普通软冷却（无 modelCooldowns）
-	for _, uid := range []string{"ok", "plain"} {
-		st, ok := p.Status(uid)
-		if !ok {
-			t.Fatalf("status(%s) missing", uid)
-		}
-		if len(st.RateLimitedModels) != 0 {
-			t.Errorf("uid=%s rate_limited_models=%v want 空（零回归）", uid, st.RateLimitedModels)
-		}
+	if em != "" {
+		t.Errorf("softRateModel should reset on reload, got %q", em)
 	}
 }
 
@@ -1257,15 +1089,15 @@ func TestFlushIdempotentWhenClean(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.Flush() // 无 dirty，不应写盘
+	p.Flush() // без dirty, писать на диск не должен
 	if _, err := os.Stat(fp); !os.IsNotExist(err) {
 		t.Fatalf("flush on clean pool should not write: %v", err)
 	}
 }
 
 func TestSaveFailureRecordedAndRecovers(t *testing.T) {
-	// stateFp 的父路径是一个普通文件（非目录）→ MkdirAll/WriteFile 必失败，
-	// root 也不可绕过，可靠地触发落盘失败路径。
+	// Родительский путь stateFp — обычный файл (не каталог) → MkdirAll/WriteFile обязательно падают,
+	// даже root не обойдёт, надёжно дёргаем путь ошибки записи на диск.
 	dir := t.TempDir()
 	block := filepath.Join(dir, "block")
 	if err := os.WriteFile(block, []byte("x"), 0o600); err != nil {
@@ -1279,7 +1111,7 @@ func TestSaveFailureRecordedAndRecovers(t *testing.T) {
 		t.Fatal("persist failure should be recorded (visible), got 0")
 	}
 
-	// 换回可写目录 → 成功后 persistFails 归零（恢复日志由零值门槛触发）。
+	// Возвращаем записываемый каталог → после успеха persistFails в ноль (лог восстановления срабатывает по нулевому порогу).
 	good := filepath.Join(t.TempDir(), "state.json")
 	p2 := New(good)
 	p2.Add(&auth.Auth{UID: "u1"})
@@ -1293,78 +1125,11 @@ func TestSaveFailureRecordedAndRecovers(t *testing.T) {
 	}
 }
 
-// TestSaveLockedPermissionDenied 不可写目录触发落盘失败：首错详报出现且无 panic，
-// persistFails 计数累加。chmod 0500 模拟容器内 app(uid 10001) 对 root:root 目录
-// 无写权限的 issue #52 场景。注意：若测试以 root 运行，chmod 不阻写——此时回落到
-// "父路径是文件"的可靠失败路径，保证测试恒定可复现。
-func TestSaveLockedPermissionDenied(t *testing.T) {
-	dir := t.TempDir()
-	stateFp := filepath.Join(dir, "state.json")
-	p := New(stateFp)
-	p.Add(&auth.Auth{UID: "u1"})
-	p.SetCredits("u1", 7)
-
-	// chmod 0500 让普通用户不可写；root 仍可写（见下方回落）。
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	p.Flush()
-	fails1 := p.persistFails
-
-	if fails1 == 0 {
-		// root 下 chmod 不阻写 → 回落到"父路径是文件"的可靠失败路径重测。
-		block := filepath.Join(t.TempDir(), "block")
-		if err := os.WriteFile(block, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		p2 := New(filepath.Join(block, "state.json"))
-		p2.Add(&auth.Auth{UID: "u1"})
-		p2.SetCredits("u1", 7)
-		p2.Flush()
-		if p2.persistFails == 0 {
-			t.Fatal("persist failure should be recorded (chmod or block-path), got 0")
-		}
-		fails1 = p2.persistFails
-	}
-	if fails1 == 0 {
-		t.Fatal("persist failure should be recorded")
-	}
-	// 无 panic 即通过（首错详报已由 notePersistFail 打印，恢复日志由零值门槛触发）。
-}
-
-// TestSaveLockedRecover 先失败后恢复：首错详报 + 恢复日志 + persistFails 归零。
-func TestSaveLockedRecover(t *testing.T) {
-	// 阶段 1：父路径是文件 → 落盘失败，persistFails 累加。
-	block := filepath.Join(t.TempDir(), "block")
-	if err := os.WriteFile(block, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	p := New(filepath.Join(block, "state.json"))
-	p.Add(&auth.Auth{UID: "u1"})
-	p.SetCredits("u1", 42)
-	p.Flush()
-	if p.persistFails == 0 {
-		t.Fatal("first flush should fail (block path)")
-	}
-
-	// 阶段 2：切到可写目录 → 落盘成功，persistFails 归零（恢复日志由零值门槛触发）。
-	good := filepath.Join(t.TempDir(), "state.json")
-	p.stateFp = good
-	p.dirty.Store(true) // 强制再写一次
-	p.Flush()
-	if p.persistFails != 0 {
-		t.Fatalf("successful save should reset persistFails, got %d", p.persistFails)
-	}
-	if raw, err := os.ReadFile(good); err != nil || !strings.Contains(string(raw), `"credits": 42`) {
-		t.Fatalf("state.json not written on recovery: %v %s", err, raw)
-	}
-}
-
 // ---------------------------------------------------------------------------
-// T2 熔断器 + 全冷却兜底 + 指数退避
+// T2 Прерыватель + полный кулдаун-фолбэк + экспоненциальный откат
 // ---------------------------------------------------------------------------
 
-// breakerUntil 曝露内部运行态供测试断言（包内私有 helper）。
+// breakerUntil раскрывает внутреннее рабочее состояние для проверок тестов (приватный helper пакета).
 func (p *Pool) breakerUntil(uid string) (time.Time, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1375,14 +1140,14 @@ func (p *Pool) breakerUntil(uid string) (time.Time, bool) {
 	return e.breakerUntil, true
 }
 
-// breakerFails 曝露 entry.fails 供测试断言（包内私有 helper）。
+// breakerFails раскрывает entry.fails для проверок тестов (приватный helper пакета).
 func (p *Pool) breakerFails(uid string) int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.byUID[uid].fails
 }
 
-// internalHealthy 曝露 entry.healthy 供测试断言（包内私有 helper）。
+// internalHealthy раскрывает entry.healthy для проверок тестов (приватный helper пакета).
 func (p *Pool) internalHealthy(uid string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1398,7 +1163,7 @@ func TestBreakerTripsAtThreshold(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetBreaker(3, time.Hour, 6*time.Hour)
 	for i := 0; i < 2; i++ {
-		p.NoteError("u1") // NoteError 只驱动熔断（不再有单独 err 冷却）
+		p.NoteError("u1") // NoteError движет только прерыватель (отдельного err-кулдауна больше нет)
 		if bt, ok := p.breakerUntil("u1"); ok && !bt.IsZero() {
 			t.Fatalf("breaker tripped too early at %d: %v", i+1, bt)
 		}
@@ -1416,7 +1181,7 @@ func TestBreakerSuccessClears(t *testing.T) {
 	p.SetBreaker(3, time.Hour, 6*time.Hour)
 	p.NoteError("u1")
 	p.NoteError("u1")
-	p.NoteError("u1") // 触发熔断
+	p.NoteError("u1") // срабатывает прерывание
 	if bt, _ := p.breakerUntil("u1"); bt.IsZero() {
 		t.Fatal("breaker should be open")
 	}
@@ -1432,11 +1197,11 @@ func TestBreakerSuccessClears(t *testing.T) {
 func TestBreakerExponentialBackoffCapped(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetBreaker(3, time.Minute, 4*time.Minute) // threshold=3：连续 3 次失败熔断一次
-	// 连续 9 次失败（无成功）→ 熔断 3 次，retryCount 1→2→3，退避 1m→2m→4m(封顶)。
+	p.SetBreaker(3, time.Minute, 4*time.Minute) // threshold=3: три последовательные ошибки — одно срабатывание
+	// 9 последовательных ошибок (без успехов) → 3 срабатывания, retryCount 1→2→3, откат 1m→2m→4m (потолок).
 	for i := 0; i < 3; i++ {
 		for j := 0; j < 3; j++ {
-			p.NoteError("u1") // 连续失败只驱动熔断
+			p.NoteError("u1") // последовательные ошибки движут только прерыватель
 		}
 	}
 	bt, ok := p.breakerUntil("u1")
@@ -1444,12 +1209,12 @@ func TestBreakerExponentialBackoffCapped(t *testing.T) {
 		t.Fatal("breaker should be open")
 	}
 	d := time.Until(bt)
-	// 第 3 次熔断：d = min(1m * 2^2, 4m) = 4m
+	// 3-е срабатывание: d = min(1m * 2^2, 4m) = 4m
 	if d < 4*time.Minute-time.Second || d > 4*time.Minute+time.Second {
 		t.Errorf("backoff should cap at max=4m, got %v", d)
 	}
 
-	// 对比第 1 次熔断（新账号重新来）：退避应更短。
+	// Сравниваем с 1-м срабатыванием (новый аккаунт заново): откат должен быть короче.
 	p2 := New("")
 	p2.Add(&auth.Auth{UID: "u1"})
 	p2.SetBreaker(3, time.Minute, 4*time.Minute)
@@ -1466,7 +1231,7 @@ func TestFallbackPicksEarliestExpiry(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "late"})
 	p.Add(&auth.Auth{UID: "early"})
-	// 两个都软冷却；early 更早到期 → 兜底选 early。
+	// Оба в мягком кулдауне; early истекает раньше → фолбэк берёт early.
 	p.Cooldown("late", CoolSoft, 2*time.Hour, "x")
 	p.Cooldown("early", CoolSoft, time.Hour, "x")
 	got := p.Pick()
@@ -1480,7 +1245,7 @@ func TestFallbackSkipsDisabled(t *testing.T) {
 	p.Add(&auth.Auth{UID: "cooled"})
 	p.Add(&auth.Auth{UID: "dead"})
 	p.Cooldown("cooled", CoolSoft, time.Hour, "x")
-	p.Disable("dead", "session dead") // 禁用不参与兜底
+	p.Disable("dead", "session dead") // отключённый в фолбэке не участвует
 	got := p.Pick()
 	if got == nil || got.UID != "cooled" {
 		t.Fatalf("fallback should skip disabled, got %+v", got)
@@ -1488,17 +1253,17 @@ func TestFallbackSkipsDisabled(t *testing.T) {
 }
 
 func TestFallbackSkipsHardCooldown(t *testing.T) {
-	// D3：余额耗尽（CoolHard）号不参与兜底——调了必 402，浪费轮换并产生噪音日志。
+	// D3: номер с исчерпанным балансом (CoolHard) в фолбэке не участвует — вызов даст гарантированный 402, трата ротации и шум в логах.
 	p := New("")
 	p.Add(&auth.Auth{UID: "hard"})
-	p.Cooldown("hard", CoolHard, time.Hour, "余额不足")
+	p.Cooldown("hard", CoolHard, time.Hour, "余额不足") // данные Reason: «недостаточно баланса», не переводим
 	if got := p.Pick(); got != nil {
 		t.Fatalf("hard-cooled account must not be fallback-picked, got %+v", got)
 	}
 }
 
 func TestFallbackAllHardReturnsNil(t *testing.T) {
-	// 全 hard 冷却 → 无软冷却/熔断号可兜底 → 返回 nil。
+	// Весь hard-кулдаун → нет номеров soft/прерывания для фолбэка → возвращаем nil.
 	p := New("")
 	p.Add(&auth.Auth{UID: "h1"})
 	p.Add(&auth.Auth{UID: "h2"})
@@ -1510,14 +1275,14 @@ func TestFallbackAllHardReturnsNil(t *testing.T) {
 }
 
 func TestFallbackSoftAndBreakerParticipate(t *testing.T) {
-	// D3：soft 与 breaker 冷却号允许参与兜底，取最早到期者。
+	// D3: номера в кулдауне soft и прерывании допускаются к фолбэку, берём того, чей срок раньше.
 	p := New("")
 	p.Add(&auth.Auth{UID: "soft"})
 	p.Add(&auth.Auth{UID: "brk"})
 	p.Cooldown("soft", CoolSoft, 10*time.Minute, "429") // soft: until=10m, fails=1
-	p.SetBreaker(2, 5*time.Minute, 5*time.Minute)       // 阈值 2：soft 的 1 次失败不熔断
+	p.SetBreaker(2, 5*time.Minute, 5*time.Minute)       // порог 2: 1 ошибка soft не прерывает
 	p.NoteError("brk")                                  // brk: fails=1
-	p.NoteError("brk")                                  // brk: 熔断，breakerUntil=5m
+	p.NoteError("brk")                                  // brk: прерывание, breakerUntil=5m
 	got := p.Pick()
 	if got == nil {
 		t.Fatal("fallback should pick breaker (earliest) account")
@@ -1537,10 +1302,10 @@ func TestFallbackNilWhenAllDisabled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// T3 三因子加权选取
+// T3 Трёхфакторный взвешенный выбор
 // ---------------------------------------------------------------------------
 
-// idleWeightOf 曝露 weightOf 的单因子拆解不便，改用完整权重断言（包内私有 helper）。
+// Раскладывать weightOf на отдельные факторы через idleWeightOf неудобно, проверяем полным весом (приватный helper пакета).
 func (p *Pool) entryWeight(uid string) float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1572,7 +1337,7 @@ func TestWeightIdleCompensation(t *testing.T) {
 	p.Add(&auth.Auth{UID: "idle"})
 	p.SetCredits("used", 100)
 	p.SetCredits("idle", 100)
-	// used 1 小时前被选中过、idle 从未使用 → idle 权重更高（闲置补偿）。
+	// used выбран час назад, idle ни разу не использован → вес idle выше (компенсация простоя).
 	p.mu.Lock()
 	p.byUID["used"].lastUsed = time.Now().Add(-1 * time.Hour)
 	p.mu.Unlock()
@@ -1598,11 +1363,11 @@ func TestWeightLowSuccessRateDowngrades(t *testing.T) {
 }
 
 func TestWeightAllZeroCreditsStillWeighted(t *testing.T) {
-	// credits 全 0：权重完全由 idle+successRate 决定，不退化均匀随机（仍可选出更高分者）。
+	// credits все 0: вес полностью определяют idle+successRate, без деградации к равномерному случайному (более весомый всё равно выбирается).
 	p := New("")
 	p.Add(&auth.Auth{UID: "idle"})
 	p.Add(&auth.Auth{UID: "bursty"})
-	// idle 从未使用、bursty 半分钟前刚用过 → idle 权重更高。
+	// idle ни разу не использован, bursty использован полминуты назад → вес idle выше.
 	p.mu.Lock()
 	p.byUID["bursty"].lastUsed = time.Now().Add(-30 * time.Second)
 	p.mu.Unlock()
@@ -1614,13 +1379,13 @@ func TestWeightAllZeroCreditsStillWeighted(t *testing.T) {
 
 func TestWeightTopFiveSelectionChanges(t *testing.T) {
 	withNoPickGap(t)
-	// credits 相差不大时，闲置补偿可让"低分但久置"的账号权重反超"高分但刚用"的账号，
-	// 即使 credits 排序里 b 在前（Top5 内权重排序可与 credits 排序不同）。
+	// Когда credits близки, компенсация простоя может поднять вес аккаунта «с низким баллом, но давним простоем» выше аккаунта «с высоким баллом, но только что использованного»,
+	// даже если в сортировке по credits b впереди (порядок весов внутри Топ5 может отличаться от порядка credits).
 	p := New("")
 	for _, u := range []string{"a", "b"} {
 		p.Add(&auth.Auth{UID: u})
 	}
-	p.SetCredits("a", 90) // a credits 略低，但久置
+	p.SetCredits("a", 90) // у a credits чуть ниже, но давний простой
 	p.SetCredits("b", 100)
 	p.mu.Lock()
 	p.byUID["b"].lastUsed = time.Now()
@@ -1632,7 +1397,7 @@ func TestWeightTopFiveSelectionChanges(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// T4 在途租约（单账号并发上限）
+// T4 Транзитная аренда (конкурентный лимит одного аккаунта)
 // ---------------------------------------------------------------------------
 
 func TestAcquireReleaseLifecycle(t *testing.T) {
@@ -1657,7 +1422,7 @@ func TestAcquireReleaseLifecycle(t *testing.T) {
 func TestAcquireUnlimited(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	// max=0 不限：连续 acquire 永不拒绝。
+	// max=0 без ограничений: подряд идущие acquire никогда не отклоняются.
 	for i := 0; i < 100; i++ {
 		if !p.Acquire("u1") {
 			t.Fatalf("unlimited acquire %d failed", i)
@@ -1670,7 +1435,7 @@ func TestAcquireUnknownUID(t *testing.T) {
 	if p.Acquire("nope") {
 		t.Fatal("acquire unknown uid should fail")
 	}
-	p.Release("nope") // 不 panic
+	p.Release("nope") // без panic
 }
 
 func TestPickSkipsInFlightFull(t *testing.T) {
@@ -1681,14 +1446,14 @@ func TestPickSkipsInFlightFull(t *testing.T) {
 	p.SetCredits("full", 1000)
 	p.SetCredits("free", 1)
 	p.SetMaxInFlight(1)
-	// full 占满唯一名额 → Pick 应跳过它，选 free（即使 credits 更低）。
+	// full занял единственное место → Pick должен пропустить его и взять free (даже с меньшими credits).
 	p.Acquire("full")
 	got := p.Pick()
 	if got == nil || got.UID != "free" {
 		t.Fatalf("pick should skip in-flight-full account, got %+v", got)
 	}
 	p.Release("full")
-	// 释放后可重新被选中（确定性随机源 r=0 → 选 credits 最高的 full）。
+	// После освобождения снова выбирается (детерминированный источник r=0 → берём full с наибольшими credits).
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	if got := p.Pick(); got == nil || got.UID != "full" {
 		t.Fatalf("after release full should be pickable, got %+v", got)
@@ -1701,14 +1466,14 @@ func TestInFlightCountNotExceedLimit(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetMaxInFlight(2)
 
-	// 并发 50 次 acquire：CAS 保证任一时刻在途数不超上限；每次成功后立即 release。
+	// 50 конкурентных acquire: CAS гарантирует, что транзитное число в любой момент не выше лимита; после каждого успеха сразу release.
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if p.Acquire("u1") {
-				// 峰值检查：acquire 成功后立即读计数，应 ≤ 2。
+				// Проверка пика: сразу после успешного acquire читаем счётчик, должно быть ≤ 2.
 				p.mu.RLock()
 				if n := p.byUID["u1"].inFlight.Load(); n > 2 {
 					t.Errorf("in-flight exceeded limit: %d", n)
@@ -1720,7 +1485,7 @@ func TestInFlightCountNotExceedLimit(t *testing.T) {
 	}
 	wg.Wait()
 
-	// 全部释放后计数必须为 0。
+	// После всех освобождений счётчик обязан быть 0.
 	p.mu.RLock()
 	n := p.byUID["u1"].inFlight.Load()
 	p.mu.RUnlock()
@@ -1730,14 +1495,14 @@ func TestInFlightCountNotExceedLimit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// T6 向后兼容 + 运行态 Status 扩展
+// T6 Обратная совместимость + расширение рабочего состояния Status
 // ---------------------------------------------------------------------------
 
 func TestLoadLegacyStateFile(t *testing.T) {
-	// 旧 state.json 只含 credits/until/disabled 等老字段，缺熔断/在途/成功率新字段。
+	// Старый state.json содержит только старые поля credits/until/disabled и т.п., новых полей прерывания/транзита/успешности нет.
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
-	legacy := `{"accounts":{"legacy":{"credits":123,"until":"2027-01-01T04:00:00+08:00","cool_kind":1,"reason":"余额不足"}}}`
+	legacy := `{"accounts":{"legacy":{"credits":123,"until":"2027-01-01T04:00:00+08:00","cool_kind":1,"reason":"余额不足"}}}` // фикстура state.json: reason-данные «недостаточно баланса», не переводим
 	if err := os.WriteFile(fp, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1747,20 +1512,20 @@ func TestLoadLegacyStateFile(t *testing.T) {
 	if !ok {
 		t.Fatal("legacy account should load")
 	}
-	if st.Credits != 123 || !st.Cooling || st.Reason != "余额不足" {
+	if st.Credits != 123 || !st.Cooling || st.Reason != "余额不足" { // данные Reason: «недостаточно баланса», не переводим
 		t.Errorf("legacy state misloaded: %+v", st)
 	}
-	// 运行态新字段默认零值。
+	// Новые поля рабочего состояния по умолчанию нулевые.
 	if st.InFlight != 0 || st.BreakerFails != 0 || !st.BreakerUntil.IsZero() {
 		t.Errorf("runtime fields should be zero for legacy load: %+v", st)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// T7 D5: Redis 状态快照镜像 + 择新恢复
+// T7 D5: Зеркало снапшотов состояния Redis + восстановление новейшего
 // ---------------------------------------------------------------------------
 
-// memStore 内存假 Store：记录 SaveState（模拟 Redis 快照）并可按需返回 LoadState。
+// memStore — фейковый Store в памяти: записывает SaveState (имитирует снапшот Redis) и по требованию отдаёт LoadState.
 type memStore struct {
 	mu       sync.Mutex
 	saved    []byte
@@ -1783,7 +1548,7 @@ func (m *memStore) LoadState() ([]byte, bool) {
 }
 
 func TestSaveMirrorsSnapshot(t *testing.T) {
-	// Flush 落盘时同步 fire-and-forget SaveState（带 saved_at）。
+	// При записи Flush на диск синхронно fire-and-forget SaveState (с saved_at).
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
@@ -1804,14 +1569,14 @@ func TestSaveMirrorsSnapshot(t *testing.T) {
 }
 
 func TestRestoreUsesRedisWhenNewer(t *testing.T) {
-	// Redis 快照比本地 state.json 新 → 采用 Redis。
+	// Снапшот Redis новее локального state.json → берём Redis.
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
-	// 本地较旧
+	// Локальный старше
 	if err := os.WriteFile(fp, []byte(`{"accounts":{"u1":{"credits":1}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// 把本地 mtime 设到过去
+	// Уводим локальный mtime в прошлое
 	old := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(fp, old, old); err != nil {
 		t.Fatal(err)
@@ -1829,7 +1594,7 @@ func TestRestoreUsesRedisWhenNewer(t *testing.T) {
 }
 
 func TestRestoreUsesLocalWhenNewer(t *testing.T) {
-	// 本地 state.json 比 Redis 快照新 → 本地优先。
+	// Локальный state.json новее снапшота Redis → приоритет у локального.
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
 	if err := os.WriteFile(fp, []byte(`{"accounts":{"u1":{"credits":77}}}`), 0o600); err != nil {
@@ -1848,7 +1613,7 @@ func TestRestoreUsesLocalWhenNewer(t *testing.T) {
 }
 
 func TestRestoreNoRedisUsesLocal(t *testing.T) {
-	// 无 Redis 快照 → 本地优先。
+	// Нет снапшота Redis → приоритет у локального.
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
 	if err := os.WriteFile(fp, []byte(`{"accounts":{"u1":{"credits":55}}}`), 0o600); err != nil {

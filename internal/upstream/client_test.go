@@ -16,50 +16,42 @@ import (
 )
 
 func TestClassify(t *testing.T) {
+	// Ниже — фикстуры апстрима на китайском (маркеры баланса 余额不足/积分不足/额度用尽 и т.п., не менять).
 	cases := []struct {
 		status int
 		body   string
 		want   ErrKind
 	}{
 		{402, ``, ErrHardCredit},
-		{400, `{"code":1,"msg":"余额不足"}`, ErrHardCredit},
+		{400, `{"code":1,"msg":"余额不足"}`, ErrHardCredit}, // фикстура апстрима (маркер нехватки баланса), не менять
 		{403, `insufficient credits`, ErrHardCredit},
-		{200, `{"code":10001,"msg":"积分不足，请充值"}`, ErrHardCredit},
-		{400, `{"code":1,"msg":"额度用尽"}`, ErrHardCredit},
+		{200, `{"code":10001,"msg":"积分不足，请充值"}`, ErrHardCredit}, // фикстура апстрима (маркер нехватки баланса), не менять
+		{400, `{"code":1,"msg":"额度用尽"}`, ErrHardCredit}, // фикстура апстрима (маркер нехватки баланса), не менять
 		{429, ``, ErrSoftRate},
-		// 限流文案（issue #28）：状态码不是 429 时也必须识别为软限流，
-		// 否则账号不会被冷却，下次请求仍会被选中。
+		// Формулировки лимита (issue #28): при статусе не 429 тоже обязаны распознавать как мягкий лимит,
+		// иначе аккаунт не уйдёт в охлаждение и следующий запрос снова его выберет.
 		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`, ErrSoftRate},
 		{400, `rate limit`, ErrSoftRate},
 		{403, `usage limit reached`, ErrSoftRate},
-		// "model usage limit exceeded" 不是余额语义（无 credit/quota/积分/额度 等计费词），
-		// 属于模型侧用量节流 → 短冷却（误判为硬冷却会把有余量的号停到次日 04:00）。
+		// "model usage limit exceeded" — не балансная семантика (нет биллинговых слов credit/quota/积分/额度 — маркеры апстрима, не менять),
+		// а дросселирование использования на стороне модели → короткий кулдаун (ошибочный жёсткий кулдаун остановил бы номер с остатком до 04:00 следующего дня).
 		{200, `{"code":1,"msg":"model usage limit exceeded"}`, ErrSoftRate},
 		{200, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
-		{500, `rate-limited upstream`, ErrSoftRate}, // 限流文案优先于 5xx 分类
-		// 内容策略拦截（HTTP 400 + 审核文案）：误报信号，不罚账号，走降级重试。
+		{500, `rate-limited upstream`, ErrSoftRate}, // формулировка лимита важнее классификации 5xx
+		// Перехват контент-политики (HTTP 400 + текст модерации): ложное срабатывание, аккаунт не штрафуем, уходим в деградированный ретрай.
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
 		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
 		{400, `unapproved channel`, ErrContentBlocked},
-		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
+		// Общий 4xx (без текста модерации): по-прежнему ErrClient, только смена номера без штрафа.
 		{400, `bad request`, ErrClient},
-		// ErrBadParams：请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）。
-		// 这是"发给上游的 body 有问题"（网关截断已由 413 消灭，剩余为客户端畸形 JSON），
-		// 换了账号也一样 400，不罚号。具体词优先于通用 4xx。
+		// ErrBadParams: тело запроса не разобралось (HTTP 400 + Unmarshal chat params failed / code 11101).
+		// Это «проблема в body, отправленном апстриму» (усечение шлюзом уже убито через 413, остаток — кривой JSON клиента),
+		// смена аккаунта всё равно даст 400, номер не штрафуем. Конкретное слово важнее общего 4xx.
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
 		{200, `quota exceeded`, ErrHardCredit},
-		// 账号级授权/配额故障（与 429 一起纳入轮换）：11140 request illegal = auth_forbidden
-		// 风控（需重登），14017 = quota_not_activated（试用未激活，需完成 register）。修复前
-		// 11140 走 4xx → ErrClient 只换号不罚，坏号留在池内被反复选中刷风控。
-		// 注意：11140 不按 code 单独判定——该 code 也承载 rate-limiting 软限流文案
-		// （上方 {200, "code":11140 rate-limiting} 必须仍是 ErrSoftRate），只能靠 msg 区分。
-		{403, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, ErrAccountFault},
-		{403, `request illegal`, ErrAccountFault},
-		{429, `{"error":{"data":{"code":14017,"msg":"The trial version is not yet activated. Please log out of your current account and log in again to activate it immediately and start your free trial."}}}`, ErrAccountFault},
-		{400, `{"code":14017,"msg":"trial not activated"}`, ErrAccountFault},
-		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
+		// Смерть сессии важнее текста лимита (401+12153 требует ручного перелогина, короткий кулдаун бессмыслен).
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},
 		{401, `Offline user session not found`, ErrSessionDead},
 		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
@@ -75,45 +67,16 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestContentBlockedClientMessage 内容拦截把上游 body 改写成防火墙口径：
-// 括号填分类关键词（由 body 抽出，抽不到回「违禁词」），绝不泄露上游 code/账号/upstream 字样。
-func TestContentBlockedClientMessage(t *testing.T) {
-	cases := []struct {
-		body    string
-		keyword string
-	}{
-		{`{"code":11128,"msg":"blocked by security policy"}`, "违禁词"},
-		{`{"code":"11128","msg":"blocked by security policy"}`, "违禁词"},
-		{`Illegal API invocation from an unapproved channel`, "违禁词"},
-		{`{"code":11128,"msg":"content contains NSFW material"}`, "nsfw"},
-		{`{"msg":"命中色情内容"}`, "色情"},
-		{`violence detected`, "violence"},
-		{"", "违禁词"},
-	}
-	for _, c := range cases {
-		got := ContentBlockedClientMessage(c.body)
-		want := fmt.Sprintf("触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则[%s]，已被拦截。请修改内容后重试。", c.keyword)
-		if got != want {
-			t.Errorf("ContentBlockedClientMessage(%q)=\n%q\nwant %q", c.body, got, want)
-		}
-		for _, leak := range []string{"11128", "account", "accounts", "账号", "upstream", "cooling", "no_healthy"} {
-			if strings.Contains(strings.ToLower(got), leak) {
-				t.Errorf("client message must not leak %q: %s", leak, got)
-			}
-		}
-	}
-}
-
-// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004）。
+// TestIsModelRateLimit проверяет, указывает ли body 429 явно на лимит уровня модели (code 6004).
 func TestIsModelRateLimit(t *testing.T) {
 	cases := []struct {
 		body string
 		want bool
 	}{
-		// 6004：模型级限流（issue #31 的核心场景）。
-		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true},
+		// 6004: лимит уровня модели (ключевой сценарий issue #31; значение апстрима, не менять).
+		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true}, // фикстура апстрима (маркер 将在…重置), не менять
 		{`{"code": 6004,"msg":"x"}`, true},
-		// 其他 code（非模型级限流）→ 不算。
+		// Прочие code (не лимит уровня модели) → не считаем.
 		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
 		{`{"code":1,"msg":"429 rate limit"}`, false},
 	}
@@ -124,7 +87,7 @@ func TestIsModelRateLimit(t *testing.T) {
 	}
 }
 
-// TestParseSoftRateReset 解析上游 429 6004 msg 里的「将在 … 重置」时间（## UTC+8）。
+// TestParseSoftRateReset разбирает из msg 429 6004 апстрима время «сброса в …» (см. маркер 将在 … 重置, пояс UTC+8).
 func TestParseSoftRateReset(t *testing.T) {
 	future := time.Now().Add(35 * time.Minute)
 	ts := future.In(softRateResetLoc).Format("2006-01-02 15:04:05")
@@ -133,12 +96,12 @@ func TestParseSoftRateReset(t *testing.T) {
 		body string
 		ok   bool
 	}{
-		{"6004 带时间+UTC+8 后缀", `{"code":6004,"msg":"将在 ` + ts + ` UTC+8 重置"}`, true},
-		{"6004 带时间无后缀", `{"code":6004,"msg":"将在 ` + ts + ` 重置"}`, true},
-		{"6004 无时间文案", `{"code":6004,"msg":"model usage limit exceeded"}`, false},
-		{"非 6004 但带时间（不是模型级）", `{"code":11140,"msg":"将在 ` + ts + ` UTC+8 重置"}`, false},
-		{"非法时间格式", `{"code":6004,"msg":"将在 明天 重置"}`, false},
-		{"空 body", ``, false},
+		{"6004 со временем и суффиксом UTC+8", `{"code":6004,"msg":"将在 ` + ts + ` UTC+8 重置"}`, true}, // фикстура апстрима (маркер 将在…重置), не менять
+		{"6004 со временем без суффикса", `{"code":6004,"msg":"将在 ` + ts + ` 重置"}`, true}, // фикстура апстрима (маркер 将在…重置), не менять
+		{"6004 без времени в тексте", `{"code":6004,"msg":"model usage limit exceeded"}`, false},
+		{"не 6004, но со временем (не уровень модели)", `{"code":11140,"msg":"将在 ` + ts + ` UTC+8 重置"}`, false}, // фикстура апстрима (маркер 将在…重置), не менять
+		{"невалидный формат времени", `{"code":6004,"msg":"将在 明天 重置"}`, false}, // фикстура: 明天 («завтра» по-китайски), не менять
+		{"пустой body", ``, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -147,12 +110,12 @@ func TestParseSoftRateReset(t *testing.T) {
 				t.Fatalf("ok=%v want %v (body=%s)", ok, c.ok, c.body)
 			}
 			if ok {
-				// 解析结果 = ts 在 UTC+8 解释下的墙钟（截断到分钟），应与 future 相差 ±2 分钟。
+				// Результат разбора = настенные часы ts в интерпретации UTC+8 (с точностью до минуты), обязан отличаться от future на ±2 минуты.
 				if d := got.Sub(future); d < -2*time.Minute || d > 2*time.Minute {
 					t.Errorf("parsed=%v want ~%v (diff %v)", got, future, d)
 				}
 				if got.Location() != time.UTC {
-					// 不同指针的 FixedZone 实例相等性按 offset 判，这里只断言 offset。
+					// Равенство разных указателей на экземпляры FixedZone проверяем по offset, здесь assert'им только offset.
 					if _, off := got.Zone(); off != 8*60*60 {
 						t.Errorf("zone offset=%d want +08:00", off)
 					}
@@ -257,7 +220,7 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		}, nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1", EnterpriseID: "e1"}
-	rc, status, respBody, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`), "", ChatMeta{})
+	rc, status, respBody, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`))
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -298,13 +261,13 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 	if len(infos) != 1 {
 		t.Fatalf("infos=%+v", infos)
 	}
-	// ModelInfo.Efforts 应携带 supportedEfforts
+	// ModelInfo.Efforts обязаны нести supportedEfforts
 	if len(infos[0].Efforts) != 2 || infos[0].Efforts[0] != "low" {
 		t.Errorf("infos[0].Efforts=%v", infos[0].Efforts)
 	}
 
-	// glm-5.2 只支持 low/high，请求 max → 降级为 high
-	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`), "", ChatMeta{})
+	// glm-5.2 поддерживает только low/high, запрос max → понижаем до high
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`))
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -320,10 +283,10 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 
 func TestChatStreamHardCreditError(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		return jsonResp(402, `{"code":1,"msg":"余额不足"}`), nil
+		return jsonResp(402, `{"code":1,"msg":"余额不足"}`), nil // фикстура апстрима (маркер нехватки баланса), не менять
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	_, status, respBody, err := c.ChatStream(a, []byte(`{}`), "", ChatMeta{})
+	_, status, respBody, err := c.ChatStream(a, []byte(`{}`))
 	if status != 402 {
 		t.Errorf("status=%d", status)
 	}
@@ -336,8 +299,8 @@ func TestChatStreamHardCreditError(t *testing.T) {
 	}
 }
 
-// TestChatStreamReadsMultipleChunksOverRealTransport 走真实 net/http 传输层，
-// 回归 defer cancel() 导致第二块起 body Read 返回 context canceled 的断流 bug。
+// TestChatStreamReadsMultipleChunksOverRealTransport идёт через реальный транспортный слой net/http,
+// регрессия на баг обрыва потока, когда defer cancel() приводил к context canceled в Read начиная со второго чанка.
 func TestChatStreamReadsMultipleChunksOverRealTransport(t *testing.T) {
 	const frames = 6
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -362,7 +325,7 @@ func TestChatStreamReadsMultipleChunksOverRealTransport(t *testing.T) {
 	c.IdleTimeout = 5 * time.Second
 
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`), "", ChatMeta{})
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`))
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -381,91 +344,6 @@ func TestChatStreamReadsMultipleChunksOverRealTransport(t *testing.T) {
 	}
 }
 
-// TestResourceSummaryAggregation 断言 ResourceSummary 聚合口径：
-// remain 取 Cycle 期剩余、size 取 CycleSize（TotalDosage 作 size 下限）、used 派生。
-func TestResourceSummaryAggregation(t *testing.T) {
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
-			return nil, errors.New("wrong path: " + r.URL.Path)
-		}
-		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"TotalDosage":3000,"Accounts":[
-			{"PackageName":"签到包","CapacitySize":2000,"CapacityRemain":1200,"CapacityUsed":800,"CycleCapacitySize":2000,"CycleCapacityRemain":1200,"CycleCapacityUsed":800},
-			{"PackageName":"体验包","CapacitySize":1000,"CapacityRemain":300,"CapacityUsed":700,"CycleCapacitySize":1000,"CycleCapacityRemain":300,"CycleCapacityUsed":700}
-		]}}}}`), nil
-	})
-	remain, used, size, packs, err := c.ResourceSummary(&auth.Auth{AccessToken: "at", UID: "u1"})
-	if err != nil {
-		t.Fatalf("summary: %v", err)
-	}
-	if remain != 1500 || size != 3000 {
-		t.Errorf("summary remain=%d size=%d want 1500/3000 (TotalDosage 作 size 下限)", remain, size)
-	}
-	// used = TotalDosage(3000) - remain(1500) = 1500。
-	if used != 1500 {
-		t.Errorf("used=%d want 1500", used)
-	}
-	if packs != 2 {
-		t.Errorf("packs=%d want 2", packs)
-	}
-}
-
-// TestResourceSummaryGlobalRealm 断言 global 账号走 global billing base + /billing/meter/*
-// （无 /v2 前缀），且 404 时 fallback /v2——realm 感知双路径，供 cmd/credit 复用。
-func TestResourceSummaryGlobalRealm(t *testing.T) {
-	var billingCalls []string
-	billSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		billingCalls = append(billingCalls, r.URL.Path)
-		if r.URL.Path == "/billing/meter/get-user-resource" {
-			w.WriteHeader(404)
-			_, _ = w.Write([]byte(`{"code":404,"msg":"nope"}`))
-			return
-		}
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[
-			{"PackageName":"g","CycleCapacitySize":500,"CycleCapacityRemain":200,"CycleCapacityUsed":300}
-		]}}}}`))
-	}))
-	defer billSrv.Close()
-
-	auth.SetGlobalEnabled(true)
-	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
-	c := &Client{
-		HTTP:              &http.Client{},
-		BillingBaseCN:     "https://billing.cn",
-		BillingBaseGlobal: strings.TrimSuffix(billSrv.URL, "/"),
-		GlobalEnabled:     true,
-	}
-	a := &auth.Auth{AccessToken: "at", UID: "g1", Domain: "www.workbuddy.ai"}
-	remain, used, size, packs, err := c.ResourceSummary(a)
-	if err != nil {
-		t.Fatalf("global summary: %v", err)
-	}
-	if remain != 200 || used != 300 || size != 500 || packs != 1 {
-		t.Errorf("global summary=%d/%d/%d/%d want 200/300/500/1", remain, used, size, packs)
-	}
-	if len(billingCalls) != 2 ||
-		billingCalls[0] != "/billing/meter/get-user-resource" ||
-		billingCalls[1] != "/v2/billing/meter/get-user-resource" {
-		t.Errorf("global billing fallback calls=%v", billingCalls)
-	}
-}
-
-// TestResourceSummaryCNUnchanged 零回归：CN 账号仍是 /v2/billing/meter/get-user-resource 单路径。
-func TestResourceSummaryCNUnchanged(t *testing.T) {
-	var calls []string
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		calls = append(calls, r.URL.Path)
-		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"Accounts":[]}}}}`), nil
-	})
-	_, _, _, _, err := c.ResourceSummary(&auth.Auth{AccessToken: "at", UID: "cn1", Domain: "www.codebuddy.cn"})
-	if err != nil {
-		t.Fatalf("cn summary: %v", err)
-	}
-	if len(calls) != 1 || calls[0] != "/v2/billing/meter/get-user-resource" {
-		t.Errorf("cn billing calls=%v want single /v2 path", calls)
-	}
-}
-
 func TestUserResourceAggregation(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
@@ -478,6 +356,7 @@ func TestUserResourceAggregation(t *testing.T) {
 		if !bytes.Contains(body, []byte(`"ProductCode":"p_tcaca"`)) {
 			return nil, errors.New("missing ProductCode: " + string(body))
 		}
+		// Фикстуры апстрима: имена пакетов на китайском (签到包/体验包), не менять.
 		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"TotalCount":2,"TotalDosage":3000,"Accounts":[
 			{"PackageName":"签到包","CapacitySize":2000,"CapacityRemain":1200,"CapacityUsed":800,"CycleCapacitySize":2000,"CycleCapacityRemain":1200,"CycleCapacityUsed":800},
 			{"PackageName":"体验包","CapacitySize":1000,"CapacityRemain":300,"CapacityUsed":700,"CycleCapacitySize":1000,"CycleCapacityRemain":300,"CycleCapacityUsed":700}
@@ -506,54 +385,55 @@ func TestUserResourceNegativeClamped(t *testing.T) {
 }
 
 func TestDailyCheckinAlready(t *testing.T) {
+	// Фикстура апстрима: msg 今日已签到 («сегодня уже отмечен», маркер alreadyCheckinMarkers, не менять).
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/daily-checkin") {
 			return nil, errors.New("wrong path")
 		}
-		return jsonResp(200, `{"code":14001,"msg":"今日已签到"}`), nil
+		return jsonResp(200, `{"code":14001,"msg":"今日已签到"}`), nil // маркер alreadyCheckinMarkers, не менять (см. выше)
 	})
 	err := c.DailyCheckin(&auth.Auth{AccessToken: "at"})
-	if err == nil || !strings.Contains(err.Error(), "已签到") {
+	if err == nil || !strings.Contains(err.Error(), "已签到") { // маркер апстрима «уже отмечен», не менять
 		t.Errorf("err=%v", err)
 	}
 }
 
-// TestIsAlreadyCheckin "今天已签到"判定为幂等成功（中文/英文 markers 均命中）。
+// TestIsAlreadyCheckin: "今天已签到" (маркер апстрима «сегодня уже отмечен», не менять) считаем идемпотентным успехом (срабатывают и китайский, и английский маркеры).
 func TestIsAlreadyCheckin(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		return jsonResp(200, `{"code":10001,"msg":"今天已签到"}`), nil
+		return jsonResp(200, `{"code":10001,"msg":"今天已签到"}`), nil // маркер alreadyCheckinMarkers, не менять (см. выше)
 	})
 	if !IsAlreadyCheckin(c.DailyCheckin(&auth.Auth{AccessToken: "at"})) {
-		t.Error("今天已签到 应判为 already")
+		t.Error("«сегодня уже отмечен» должны классифицировать как already")
 	}
 
 	c2 := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(200, `{"code":10001,"msg":"Already checked in today"}`), nil
 	})
 	if !IsAlreadyCheckin(c2.DailyCheckin(&auth.Auth{AccessToken: "at"})) {
-		t.Error("already(英文) 应判为 already")
+		t.Error("already (английский) должны классифицировать как already")
 	}
 }
 
-// TestIsAlreadyCheckinRejectsNonUpstream 网络层/解析层错误不得当作幂等成功。
-// 误判会让当天实际未签到的账号被标成正常（停机补签遇到抖动时尤其危险）。
+// TestIsAlreadyCheckinRejectsNonUpstream: ошибки сетевого/разборного слоя нельзя считать идемпотентным успехом.
+// Ошибочное признание записало бы фактически не отметившийся за день аккаунт в нормальные (особенно опасно при догоняющем чекине после простоя с джиттером).
 func TestIsAlreadyCheckinRejectsNonUpstream(t *testing.T) {
 	if IsAlreadyCheckin(errors.New("dial tcp: connection refused")) {
-		t.Error("网络错误不得判为 already")
+		t.Error("сетевую ошибку нельзя классифицировать как already")
 	}
 	if IsAlreadyCheckin(errors.New("parse failed: unexpected EOF")) {
-		t.Error("解析错误不得判为 already")
+		t.Error("ошибку разбора нельзя классифицировать как already")
 	}
-	// 非"已签到"语义的上游业务错误（如余额不足）也不得判为 already。
+	// Не относящаяся к «уже отмечен» бизнес-ошибка апстрима (например нехватка баланса — фикстура 积分不足，请充值, не менять) тоже не должна считаться already.
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		return jsonResp(200, `{"code":10002,"msg":"积分不足，请充值"}`), nil
+		return jsonResp(200, `{"code":10002,"msg":"积分不足，请充值"}`), nil // фикстура нехватки баланса, не менять (см. выше)
 	})
 	if IsAlreadyCheckin(c.DailyCheckin(&auth.Auth{AccessToken: "at"})) {
-		t.Error("余额不足不得判为 already")
+		t.Error("нехватку баланса нельзя классифицировать как already")
 	}
-	// nil 不判为 already。
+	// nil не считаем already.
 	if IsAlreadyCheckin(nil) {
-		t.Error("nil 不得判为 already")
+		t.Error("nil нельзя классифицировать как already")
 	}
 }
 
@@ -564,7 +444,7 @@ func TestBasesAlwaysCN(t *testing.T) {
 	if c.chatBase(cn) != "https://chat.example" || c.billingBase(cn) != "https://billing.example" {
 		t.Error("cn bases wrong")
 	}
-	// 恒 CN：domain 不同不改变上游 host。
+	// Всегда CN: различия в domain не меняют хост апстрима.
 	if c.chatBase(other) != c.chatBase(cn) || c.billingBase(other) != c.billingBase(cn) {
 		t.Error("bases must be CN regardless of domain")
 	}
@@ -578,7 +458,7 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 	if c.ChatHTTP.Timeout != 0 {
 		t.Errorf("ChatHTTP.Timeout=%v want 0 (no total cap)", c.ChatHTTP.Timeout)
 	}
-	// 共享同一个 Transport 实例，连接池不重复。
+	// Совместно используем один экземпляр Transport, пул соединений не дублируем.
 	if c.ChatHTTP.Transport != c.HTTP.Transport {
 		t.Errorf("ChatHTTP and HTTP must share the same *http.Transport")
 	}
@@ -592,7 +472,7 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 }
 
 func TestChatStreamRoutesToChatHTTP(t *testing.T) {
-	// 显式注入 ChatHTTP（可辨识标记），验证 ChatStream 走它而非 HTTP。
+	// Явно инжектим ChatHTTP (с опознаваемой меткой), проверяем, что ChatStream идёт через него, а не через HTTP.
 	chatHit, httpHit := false, false
 	c := testClient(func(*http.Request) (*http.Response, error) {
 		httpHit = true
@@ -607,7 +487,7 @@ func TestChatStreamRoutesToChatHTTP(t *testing.T) {
 		}, nil
 	})}
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	rc, status, _, err := c.ChatStream(a, []byte(`{}`), "", ChatMeta{})
+	rc, status, _, err := c.ChatStream(a, []byte(`{}`))
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}

@@ -1,12 +1,12 @@
-// Package session 会话粘性路由：同一会话（conversationId / metadata 键）尽量绑定同一账号。
+// Package session — липкая маршрутизация сессий: одна сессия (ключ conversationId / metadata) по возможности сидит на одном номере.
 //
-// 设计参考 antigravityProxyGo internal/session（fast-path RLock / 双段分配 / TTL / 持久化），
-// 但改为纯内存 + redisstore 异步镜像：
-//   - 命中走 RLock 快查（绝大多数请求已绑定）；
-//   - 未命中/失效走写锁 re-check 后分配，避免同 key 并发重复分配（TOCTOU 防护）；
-//   - 分配优先"空闲账号"（未绑定任何会话的可用号）哈希，其次全池哈希（双段策略）；
-//   - LastActive 滚动续期，TTL 过期由后台 GC 或快路径惰性过期清理；
-//   - 每次绑定变更 fire-and-forget 镜像到 redisstore（防重启丢粘性）。
+// Дизайн сверялись с antigravityProxyGo internal/session (fast-path RLock / двухсегментное распределение / TTL / персистентность),
+// но переделали на чистую память + асинхронное зеркало в redisstore:
+//   - попадание идёт быстрым поиском под RLock (подавляющее большинство запросов уже привязано);
+//   - промах/протухание идёт распределением после re-check под замком записи, чтобы не раздать один key дважды из конкурентности (защита от TOCTOU);
+//   - распределение сначала хеширует «свободные номера» (доступные, не привязанные ни к одной сессии), затем весь пул (двухсегментная стратегия);
+//   - LastActive катится продлением, протухшие по TTL чистят фоновый GC или ленивое протухание быстрого пути;
+//   - каждое изменение привязки зеркалируем в redisstore по fire-and-forget (чтобы рестарт не ронял липкость).
 package session
 
 import (
@@ -18,30 +18,22 @@ import (
 	"workbuddy2api/internal/redisstore"
 )
 
-// entry 单条会话绑定。
+// entry — одна привязка сессии.
 type entry struct {
 	uid        string
 	lastActive time.Time
 }
 
-// Config 路由依赖；Available 返回"可用账号"（healthy 且未占满在途）的有序 uid 列表，
-// 由 pool.AvailableUIDs 提供。Store 可为 redisstore.Noop（纯内存）。
+// Config — зависимости роутера; Available возвращает упорядоченный список uid «доступных номеров» (healthy и с незаполненным in-flight),
+// предоставляет pool.AvailableUIDs. Store может быть redisstore.Noop (чистая память).
 type Config struct {
 	TTL        time.Duration
 	GCInterval time.Duration
 	Store      redisstore.Store
 	Available  func() []string
-	// AvailableForModel 按请求模型返回"在该模型上可用"的账号
-	// （healthy 且未占满在途，且未被该模型限流/限额）。nil 时回落 Available
-	// （无模型维度，行为与引入前一致）。
-	//
-	// 为什么粘性需要模型维度：绑定只记 uid，而同一个会话可能换模型。账号被 6004
-	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
-	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
-	AvailableForModel func(model string) []string
 }
 
-// Router 会话粘性路由器。
+// Router — роутер липких сессий.
 type Router struct {
 	mu      sync.RWMutex
 	entries map[string]entry
@@ -49,8 +41,8 @@ type Router struct {
 	stop    chan struct{}
 }
 
-// New 构建路由器。若 cfg.Store 为 nil 则用 Noop（纯内存）；cfg.Available 为 nil 视为空池。
-// TTL/GCInterval 非正取默认（30m / 5m）——main 从 config 解析后传入，这里兜底。
+// New создаёт роутер. Если cfg.Store равен nil — берём Noop (чистая память); cfg.Available равный nil считаем пустым пулом.
+// Неположительные TTL/GCInterval заменяем умолчаниями (30m / 5m) — main передаёт распарсенное из config, здесь страховка.
 func New(cfg Config) *Router {
 	if cfg.Store == nil {
 		cfg.Store = redisstore.Noop{}
@@ -64,7 +56,7 @@ func New(cfg Config) *Router {
 	return &Router{entries: map[string]entry{}, cfg: cfg}
 }
 
-// StartGC 启动后台 GC goroutine（幂等）。进程退出时调 StopGC。
+// StartGC запускает фоновую GC-goroutine (идемпотентно). При выходе процесса вызываем StopGC.
 func (r *Router) StartGC() {
 	r.mu.Lock()
 	if r.stop != nil {
@@ -88,7 +80,7 @@ func (r *Router) StartGC() {
 	}()
 }
 
-// StopGC 停止后台 GC（幂等）。
+// StopGC останавливает фоновую GC (идемпотентно).
 func (r *Router) StopGC() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -98,8 +90,8 @@ func (r *Router) StopGC() {
 	}
 }
 
-// LoadFromStore 启动时从 redisstore 恢复绑定（内存覆盖本地，读操作仅此处发生）。
-// 已有本地绑定被保留——Redis 仅为恢复备份，本地一旦建立即为权威。
+// LoadFromStore при старте восстанавливает привязки из redisstore (память поверх локального, чтение происходит только здесь).
+// Уже существующие локальные привязки сохраняем — Redis лишь бэкап для восстановления, локальное после создания авторитетно.
 func (r *Router) LoadFromStore() {
 	binds := r.cfg.Store.LoadBinds()
 	if len(binds) == 0 {
@@ -117,28 +109,17 @@ func (r *Router) LoadFromStore() {
 	}
 	r.mu.Unlock()
 	if loaded > 0 {
-		log.Printf("[session] 从 Redis 恢复 %d 条粘性会话绑定", loaded)
+	log.Printf("[session] восстановлено %d липких привязок сессий из Redis", loaded)
 	}
 }
 
-// Resolve 返回会话 key 应绑定的账号 uid，ok=false 表示当前无可用账号。
-// 无模型维度（等价于 ResolveForModel(key, "")），保留给不关心模型的调用方。
+// Resolve возвращает uid номера, к которому должен липнуть ключ сессии; ok=false означает, что доступных номеров сейчас нет.
+// Попали и номер доступен → катим lastActive и сразу возвращаем; иначе (ленивый исключительный случай) идём перераспределять.
 func (r *Router) Resolve(key string) (string, bool) {
-	return r.ResolveForModel(key, "")
-}
-
-// ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
-// 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
-// 被该模型限流）走重新分配。
-//
-// 为什么必须带模型：绑定只记 uid，同一个会话可能换模型；账号被 6004 模型级限额后
-// 对其他模型仍可用（见 pool.healthyForModel 的模型级冷却豁免）。若只按账号级
-// 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
-func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet(model)
+	available := r.availableSet()
 
-	// ── Fast path: RLock 快查 ──────────────────────────────
+// ── Fast path: быстрый поиск под RLock ──────────────────────────────
 	r.mu.RLock()
 	e, found := r.entries[key]
 	r.mu.RUnlock()
@@ -147,28 +128,28 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 			r.touch(key, e.uid, now)
 			return e.uid, true
 		}
-		// 绑定号在该模型上已冷却/占满/被限流 → 失效，落入慢路径重分配。
+		// Привязанный номер охлаждён/занят → привязка недействительна, падаем в медленный путь перераспределения.
 	}
 
-	// ── Slow path: 写锁 re-check 后分配 ────────────────────
+// ── Slow path: распределение после re-check под замком записи ────────────────────
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// re-check：并发同 key 可能已被其他 goroutine 分配好。
+	// re-check: конкурентный тот же key другая горутина уже могла распределить.
 	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
 		if available[e2.uid] {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
 		}
-		delete(r.entries, key) // 失效：清掉再分配
+		delete(r.entries, key) // недействительна: стираем и распределяем заново
 	}
 
-	uids := r.availableSlice(model)
+	uids := r.availableSlice()
 	if len(uids) == 0 {
 		return "", false
 	}
 
-	// 双段策略：优先"空闲账号"（未被任何会话绑定的可用号），其次全池。
+	// Двухсегментная стратегия: сначала «свободные номера» (доступные, не привязанные ни к одной сессии), затем весь пул.
 	bound := map[string]bool{}
 	for _, v := range r.entries {
 		bound[v.uid] = true
@@ -194,7 +175,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	return uid, true
 }
 
-// touch 滚动 lastActive 并异步镜像（只在快路径命中时写最后一次）。
+// touch катит lastActive и зеркалирует асинхронно (пишем напоследок только при попадании быстрого пути).
 func (r *Router) touch(key, uid string, now time.Time) {
 	r.mu.Lock()
 	r.entries[key] = entry{uid: uid, lastActive: now}
@@ -202,9 +183,9 @@ func (r *Router) touch(key, uid string, now time.Time) {
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
 }
 
-// Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。
-// 供"粘性跟随最终成功号"用：请求成功返回前，把会话重绑到实际成功的账号，让多轮对话下一跳稳定
-// 收敛到"对该会话持续成功的号"（对齐 antigravity 语义）。空 key 直接返回（无会话则不绑）。
+// Bind явно привязывает ключ сессии к uid (идемпотентно поверх старого) и зеркалирует асинхронно в redisstore.
+// Для «липкость следует за финально успешным номером»: перед успешным ответом перепривязываем сессию на реально успешный номер, чтобы следующий ход многодиалога стабильно
+// сходился к «номеру, стабильно успешному для этой сессии» (вровень с семантикой antigravity). Пустой key — сразу возврат (без сессии не привязываем).
 func (r *Router) Bind(key, uid string) {
 	if key == "" || uid == "" {
 		return
@@ -216,7 +197,7 @@ func (r *Router) Bind(key, uid string) {
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
 }
 
-// Unbind 解除会话绑定（请求失败时调用，让该会话下次重新分配）。返回是否存在。
+// Unbind снимает привязку сессии (вызываем при неудаче запроса, чтобы сессия в следующий раз перераспределилась). Возвращает, была ли.
 func (r *Router) Unbind(key string) bool {
 	r.mu.Lock()
 	_, found := r.entries[key]
@@ -230,14 +211,14 @@ func (r *Router) Unbind(key string) bool {
 	return found
 }
 
-// Count 返回当前绑定数（供 /status 观测）。
+// Count возвращает текущее число привязок (для наблюдения через /status).
 func (r *Router) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.entries)
 }
 
-// gcOnce 清理 TTL 过期的绑定，并镜像删除。
+// gcOnce чистит протухшие по TTL привязки и зеркалирует удаление.
 func (r *Router) gcOnce(now time.Time) int {
 	r.mu.Lock()
 	var expiredKeys []string
@@ -256,9 +237,9 @@ func (r *Router) gcOnce(now time.Time) int {
 	return len(expiredKeys)
 }
 
-// availableSet 把可用账号列表转集合（快路径命中校验用）。
-func (r *Router) availableSet(model string) map[string]bool {
-	uids := r.availableSlice(model)
+// availableSet превращает упорядоченный список Available() во множество (для проверки попадания быстрого пути).
+func (r *Router) availableSet() map[string]bool {
+	uids := r.availableSlice()
 	set := make(map[string]bool, len(uids))
 	for _, u := range uids {
 		set[u] = true
@@ -266,12 +247,8 @@ func (r *Router) availableSet(model string) map[string]bool {
 	return set
 }
 
-// availableSlice 安全调用可用账号函数（nil 函数视空池）。
-// 优先走 AvailableForModel（带模型过滤）；未注入时回落 Available（无模型维度）。
-func (r *Router) availableSlice(model string) []string {
-	if r.cfg.AvailableForModel != nil {
-		return r.cfg.AvailableForModel(model)
-	}
+// availableSlice безопасно вызывает Available (nil-функцию считаем пустым пулом).
+func (r *Router) availableSlice() []string {
 	if r.cfg.Available == nil {
 		return nil
 	}
@@ -282,7 +259,7 @@ func expired(e entry, now time.Time, ttl time.Duration) bool {
 	return now.Sub(e.lastActive) > ttl
 }
 
-// hashIndex FNV-1a 哈希取模（antigravity 双段分配的稳定散列）。
+// hashIndex — взятие хеша FNV-1a по модулю (стабильный хеш двухсегментного распределения antigravity).
 func hashIndex(key string, n int) int {
 	var h uint32 = 2166136261
 	for i := 0; i < len(key); i++ {
@@ -292,16 +269,16 @@ func hashIndex(key string, n int) int {
 	return int(h % uint32(n))
 }
 
-// ExtractKey 从请求体提取会话键；按下列顺序依次尝试，找不到返回空串（绝不失败）。
+// ExtractKey извлекает ключ сессии из тела запроса; пробуем по порядку ниже, не нашли — возвращаем пустую строку (никогда не ошибаемся).
 //  1. metadata.conversation_id
 //  2. metadata.conversationId
 //  3. conversation_id
 //  4. conversationId
 //  5. metadata.user_id
 //
-// issue #35：客户端实际发 camelCase 的 conversationId，此前只识别 snake_case，
-// 导致粘性路由不命中、同对话轮转不同账号、上游上下文缓存 miss。现两种命名均识别，
-// snake_case 优先级高于 camelCase（同值不同名命中同一对话时返回相同值，天然不混用）。
+// issue #35: клиент реально шлёт camelCase conversationId, раньше распознавали только snake_case,
+// из-за чего липкий роутер мазал, один диалог крутился по разным номерам и контекстный кэш апстрима промахивался. Теперь распознаём оба написания,
+// приоритет snake_case выше camelCase (при одном значении под разными именами одного диалога возвращается то же значение, смешения нет по построению).
 func ExtractKey(body []byte) string {
 	if len(body) == 0 {
 		return ""
@@ -327,7 +304,7 @@ func ExtractKey(body []byte) string {
 	return strOrEmpty(obj["conversationId"])
 }
 
-// strOrEmpty 把 JSON 字符串字段安全转 string（非字符串类型返回空）。
+// strOrEmpty безопасно превращает строковое поле JSON в string (нестроковый тип возвращает пусто).
 func strOrEmpty(v any) string {
 	s, _ := v.(string)
 	return s

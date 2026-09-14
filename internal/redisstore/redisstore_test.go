@@ -13,10 +13,10 @@ func TestNormalizeURL(t *testing.T) {
 		token string
 		want  string
 	}{
-		{"完整rediss", "rediss://default:tok@host:6379", "ignored", "rediss://default:tok@host:6379"},
-		{"完整redis", "redis://default:tok@host:6379", "ignored", "redis://default:tok@host:6379"},
+		{"полный rediss", "rediss://default:tok@host:6379", "ignored", "rediss://default:tok@host:6379"},
+		{"полный redis", "redis://default:tok@host:6379", "ignored", "redis://default:tok@host:6379"},
 		{"https host", "https://foo.upstash.io", "tok", "rediss://default:tok@foo.upstash.io:6379"},
-		{"裸host", "foo.upstash.io", "tok", "rediss://default:tok@foo.upstash.io:6379"},
+		{"голый host", "foo.upstash.io", "tok", "rediss://default:tok@foo.upstash.io:6379"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -28,7 +28,7 @@ func TestNormalizeURL(t *testing.T) {
 }
 
 func TestNormalizeURLStripsTrailingPath(t *testing.T) {
-	// 用户照抄 Upstash 控制台的 REST 地址，可能带任意路径——剥 scheme 只取 host:port 之前段。
+	// Пользователь может вставить REST-адрес из консоли Upstash с любым путём — отрезаем scheme и берём только host.
 	got := normalizeURL("https://foo.upstash.io", "t")
 	if strings.Contains(got, "://foo.upstash.io") && !strings.HasSuffix(got, "foo.upstash.io:6379") {
 		t.Errorf("unexpected: %s", got)
@@ -42,7 +42,7 @@ func TestNewEmptyURLReturnsNoop(t *testing.T) {
 }
 
 func TestNewBadSchemeReturnsNoop(t *testing.T) {
-	// 组装出的连接串含空格 → ParseURL 解析失败 → 降级 Noop，不 panic、不发网络请求。
+	// Собранная строка соединения содержит пробел → ParseURL не разбирает → деградируем в Noop, без panic и без сетевых запросов.
 	if _, ok := New("://bad host", "").(Noop); !ok {
 		t.Fatalf("bad url should return Noop")
 	}
@@ -50,7 +50,7 @@ func TestNewBadSchemeReturnsNoop(t *testing.T) {
 
 func TestNoopMethods(t *testing.T) {
 	n := Noop{}
-	n.SetBind("k", "u", time.Minute) // 不 panic
+	n.SetBind("k", "u", time.Minute) // без panic
 	n.DelBind("k")
 	n.SaveState([]byte("{}"))
 	if _, ok := n.LoadState(); ok {

@@ -8,7 +8,7 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// TestGrowthStreakParsesDays 解析 data.streak.days（probe_active.py 同口径）。
+// TestGrowthStreakParsesDays разбирает data.streak.days (тот же срез, что в probe_active.py).
 func TestGrowthStreakParsesDays(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/activity/growth/streak" {
@@ -31,7 +31,7 @@ func TestGrowthStreakParsesDays(t *testing.T) {
 	}
 }
 
-// TestGrowthStreakDefaultZero 缺 streak/days 字段 → 0（days==0 即自检告警信号）。
+// TestGrowthStreakDefaultZero — без полей streak/days → 0 (days==0 и есть сигнальный флаг самопроверки).
 func TestGrowthStreakDefaultZero(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"code":0,"data":{}}`))
@@ -44,11 +44,11 @@ func TestGrowthStreakDefaultZero(t *testing.T) {
 		t.Fatalf("GrowthStreak: %v", err)
 	}
 	if days != 0 {
-		t.Errorf("days=%d want 0（缺字段零值）", days)
+		t.Errorf("days=%d, хотим 0 (нулевое значение при отсутствующих полях)", days)
 	}
 }
 
-// TestGrowthStreakServerError HTTP 非 2xx → *Error。
+// TestGrowthStreakServerError — HTTP не-2xx → *Error.
 func TestGrowthStreakServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
@@ -62,7 +62,7 @@ func TestGrowthStreakServerError(t *testing.T) {
 	}
 }
 
-// TestGrowthStreakBusinessCode 业务 code 非 0 → 错误（非 2xx 之外的静默失败也要能被观测）。
+// TestGrowthStreakBusinessCode — бизнес-code != 0 → ошибка (тихие провалы помимо не-2xx тоже обязаны наблюдаться).
 func TestGrowthStreakBusinessCode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)

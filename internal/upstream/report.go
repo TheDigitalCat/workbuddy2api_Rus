@@ -1,10 +1,10 @@
-// report.go growth 域「对话活跃上报」接口：POST {billingBase}/v2/report。
-// 照抄客户端 chat_request_send 事件形状（含 conversationId/mode/inputLength 等全字段，
-// 勿用最小 3 字段，防上游后续加严）。事件必须带 userId（=账号 uid），缺失则服务端
-// 200 但静默丢弃（实测见 REPORT-active-map.md §2）。
+// report.go — интерфейс «отчёта об активности диалога» growth-домена: POST {billingBase}/v2/report.
+// В точности копируем форму события chat_request_send клиента (со всеми полями conversationId/mode/inputLength и т.д.,
+// не сводим к минимальным 3 полям, чтобы не сломаться при будущем ужесточении апстрима). Событие обязано нести userId (= uid аккаунта), при отсутствии сервер
+// отвечает 200, но молча отбрасывает (замерено, см. REPORT-active-map.md §2).
 //
-// 一条上报同时点亮 growth 连登 + 解锁 first_buddy 任务（领养前置）。
-// 风控口径：每号每天 1 次即可（activity_hours 单时点），不做多时点高频上报。
+// Один отчёт разом зажигает growth-серию входов подряд + разблокирует задачу first_buddy (предусловие приюта).
+// Риск-контур: достаточно 1 раза в сутки на номер (activity_hours одной точкой), высокочастотные многоточечные отчёты не шлём.
 package upstream
 
 import (
@@ -17,12 +17,12 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// reportPath 活跃上报通道（实测）。
+// reportPath — канал отчёта об активности (замерен).
 const reportPath = "/v2/report"
 
-// billingJSON 发 billing 域（billingBase，codebuddy.cn）请求并解信封；body 为 nil 时不带请求体。
-// 与 travel.go 的 growthJSON 对称（growth 域走 chatBase + BillingHeaders；billing 域走 billingBase）。
-// report/checkin 等 billing 端点共用：请求头统一 BillingHeaders，信封与错误语义同 doJSON。
+// billingJSON шлёт запрос billing-домена (billingBase, codebuddy.cn) и разбирает конверт; при body nil тело запроса не несём.
+// Симметричен growthJSON из travel.go (growth-домен идёт через chatBase + BillingHeaders; billing-домен — через billingBase).
+// Общий для billing-эндпоинтов report/checkin и т.п.: заголовки единообразно BillingHeaders, конверт и семантика ошибок как у doJSON.
 func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.RawMessage, error) {
 	var rdr io.Reader
 	if body != nil {
@@ -40,8 +40,8 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 	return c.doJSON(req)
 }
 
-// chatRequestEvent 客户端 chat_request_send 事件完整形状（与 probe_active.py chat_event 对齐）。
-// userId 为必填字段（= a.UID）；conversationId 由调用方生成，无需真实会话。
+// chatRequestEvent — полная форма события chat_request_send клиента (выровнена под chat_event из probe_active.py).
+// userId — обязательное поле (= a.UID); conversationId генерирует вызывающая сторона, реальная сессия не нужна.
 type chatRequestEvent struct {
 	EventCode             string `json:"eventCode"`
 	Timestamp             int64  `json:"timestamp"`
@@ -81,15 +81,10 @@ type chatRequestEvent struct {
 	UserID                string `json:"userId"`
 }
 
-// ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
-// conversationID 由调用方生成（如 wb2api-<ms>），无需真实会话——服务端不校验一致性。
-// requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时回落 conversationID。
-// 错误语义与 doJSON 一致：HTTP 非 2xx / 业务 code != 0 → *Error。
-//
-// 与 issue #35 会话头族（X-Conversation-Request-ID）保持独立：本接口是 growth 域
-// 活跃上报（仅点亮连登/first_buddy，每号每天 1 次），event.requestId 是事件级标识，
-// 后台按 growth 事件去重，不走 chat 后台的 X-Conversation-Request-ID 聚合——对齐
-// 官方 chat_request_send 事件形状（probe_active.py），刻意不复用聚合主键。
+// ReportChatActivity отправляет апстриму один отчёт об активности диалога (chat_request_send).
+// conversationID генерирует вызывающая сторона (например wb2api-<ms>), реальная сессия не нужна — сервер консистентность не проверяет.
+// requestID — независимый идентификатор запроса этого хода (при многоходовых отчётах одной сессии каждый свой); при пустом откатываемся на conversationID.
+// Семантика ошибок как у doJSON: HTTP не-2xx / бизнес-code != 0 → *Error.
 func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {
 	if requestID == "" {
 		requestID = conversationID

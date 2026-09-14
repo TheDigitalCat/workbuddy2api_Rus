@@ -15,31 +15,16 @@
     "travel_hours": [9, 21],
     "activity_hours": [10],
     "keepalive_hours": [22],
-    "school_hours": [12],
-    "cat_hours": [1],
     "checkin_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,
-    "keepalive_enabled": true,
-    "school_enabled": true,
-    "cat_enabled": true
-  },
-  "global": {
-    "enabled": true,
-    "chat_base": "",
-    "billing_base": ""
+    "keepalive_enabled": true
   },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
-    "user_agent": "",
-    "client_version": "",
-    "cli_version": "",
-    "device_token": "",
-    "device_token_file": "",
-    "client_name": "",
-    "passthrough_ip": false
+    "user_agent": ""
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
